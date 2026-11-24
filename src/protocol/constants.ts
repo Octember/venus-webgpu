@@ -98,6 +98,15 @@ export const VK_COMMAND_TYPE = {
   vkQueuePresentKHR: 422,
 } as const;
 
+const VK_COMMAND_NAMES = new Map<number, string>(
+  Object.entries(VK_COMMAND_TYPE).map(([name, id]) => [id, name]),
+);
+
+/** Returns the human-readable Venus command name for a wire command ID. */
+export function vkCommandName(type: number): string {
+  return VK_COMMAND_NAMES.get(type) ?? `unknown(${type})`;
+}
+
 export type VkCommandType = (typeof VK_COMMAND_TYPE)[keyof typeof VK_COMMAND_TYPE];
 
 export const VK_COMMAND_GENERATE_REPLY_BIT_EXT = 1;

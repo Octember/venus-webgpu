@@ -23,7 +23,6 @@ import {
   vkTopologyToWebGpu,
   vkVertexFormatToWebGpu,
 } from "./vk-to-webgpu.ts";
-export { reflectStorageAccess };
 import type {
   VenusCommandHandler,
   VkDescriptorSetLayoutBinding,
@@ -54,17 +53,65 @@ import {
   type VenusPipelineLayout,
 } from "./objects.ts";
 
+export { reflectStorageAccess };
+
 const DEFAULT_PHYS_DEVICE_HANDLE = 0x1000n;
 const ALIGNMENT = 256;
 
 function alignUp(n: number, align: number): number {
-  return (n + align - 1) & ~(align - 1);
+  return Math.ceil(n / align) * align;
+}
+
+export interface RequestWebGpuDeviceOptions {
+  adapterOptions?: GPURequestAdapterOptions;
+  deviceDescriptor?: GPUDeviceDescriptor;
+  onUncapturedError?: (error: GPUError) => void;
+}
+
+/**
+ * Requests a WebGPU `GPUDevice` with actionable diagnostics when unavailable.
+ * @example
+ * const device = await requestWebGpuDevice();
+ */
+export async function requestWebGpuDevice(options: RequestWebGpuDeviceOptions = {}): Promise<GPUDevice> {
+  const gpu = (globalThis as { navigator?: { gpu?: GPU } }).navigator?.gpu;
+  if (!gpu) {
+    throw new Error(
+      "WebGPU is unavailable (navigator.gpu is undefined). Ensure you are in a Secure Context (https:// or localhost) in a supported browser (Chrome/Edge 113+, Safari 18+, Firefox Nightly).",
+    );
+  }
+  const adapter = await gpu.requestAdapter(options.adapterOptions);
+  if (!adapter) {
+    throw new Error(
+      "No WebGPU adapter found. Check that hardware acceleration is enabled, or pass --enable-unsafe-webgpu in headless Chrome.",
+    );
+  }
+  const device = await adapter.requestDevice(options.deviceDescriptor);
+  const onError =
+    options.onUncapturedError ??
+    ((err: GPUError) => console.error("[WebGPU uncapturederror]", err.message));
+  device.addEventListener("uncapturederror", (e) => {
+    onError((e as GPUUncapturedErrorEvent).error);
+  });
+  return device;
 }
 
 export interface WebGpuVenusBackendOptions {
   device: GPUDevice;
   translator?: SpirvTranslator;
   canvasContext?: GPUCanvasContext;
+  debug?: boolean;
+  onError?: (err: unknown) => void;
+  onWarn?: (msg: string) => void;
+}
+
+export interface WebGpuVenusStats {
+  buffers: number;
+  memories: number;
+  shaders: number;
+  pipelines: number;
+  images: number;
+  shaderCacheSize: number;
 }
 
 export class WebGpuVenusBackend implements VenusCommandHandler {
@@ -75,11 +122,26 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   private pendingWork: Promise<void> = Promise.resolve();
   private readonly rings = new Map<bigint, VkRingCreateInfoMESA>();
   private replyStream: { resourceId: number; offset: number; size: number; position: number } | null = null;
+  private readonly onError: (err: unknown) => void;
+  private readonly onWarn: (msg: string) => void;
 
   constructor(opts: WebGpuVenusBackendOptions) {
     this.device = opts.device;
     this.translator = opts.translator ?? new SpirvTranslator();
     this.canvasContext = opts.canvasContext;
+    this.onError = opts.onError ?? ((err) => console.error("[WebGpuVenusBackend]", err));
+    this.onWarn = opts.onWarn ?? (opts.debug ? (msg) => console.warn("[WebGpuVenusBackend]", msg) : () => {});
+  }
+
+  getStats(): WebGpuVenusStats {
+    return {
+      buffers: this.objects.buffers.size,
+      memories: this.objects.memories.size,
+      shaders: this.objects.shaderModules.size,
+      pipelines: this.objects.pipelines.size,
+      images: this.objects.images.size,
+      shaderCacheSize: this.translator.cacheSize,
+    };
   }
 
   reset(): void {
@@ -183,6 +245,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   ): VkResult {
     const size = alignUp(Math.max(4, Number(allocationSize)), ALIGNMENT);
     const gpuBuffer = this.device.createBuffer({
+      label: `venus:memory:${memory}`,
       size,
       usage:
         GPUBufferUsage.STORAGE |
@@ -294,7 +357,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
 
   async vkCreateShaderModule(_device: VkHandle, code: Uint32Array, shaderModule: VkHandle): Promise<VkResult> {
     const { wgsl } = await this.translator.translateToWgsl(code);
-    const module = this.device.createShaderModule({ code: wgsl });
+    const module = this.device.createShaderModule({ label: `venus:shader:${shaderModule}`, code: wgsl });
     this.objects.shaderModules.set(shaderModule, { handle: shaderModule, wgsl, module });
     return VK_RESULT.VK_SUCCESS;
   }
@@ -309,7 +372,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     layout: VkHandle,
   ): VkResult {
     const entries = bindings.map((b) => buildBindGroupLayoutEntry(b));
-    const gpuLayout = this.device.createBindGroupLayout({ entries });
+    const gpuLayout = this.device.createBindGroupLayout({ label: `venus:dsl:${layout}`, entries });
     this.objects.descriptorSetLayouts.set(layout, { handle: layout, bindings, gpuLayout });
     return VK_RESULT.VK_SUCCESS;
   }
@@ -325,6 +388,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       return l;
     });
     const gpuLayout = this.device.createPipelineLayout({
+      label: `venus:pipelineLayout:${pipelineLayout}`,
       bindGroupLayouts: resolved.map((l) => l.gpuLayout),
     });
     this.objects.pipelineLayouts.set(pipelineLayout, {
@@ -355,6 +419,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       storageAccess,
     );
     const gpuPipeline = this.device.createComputePipeline({
+      label: `venus:computePipeline:${pipeline}`,
       layout: pipelineLayout,
       compute: { module: mod.module, entryPoint },
     });
@@ -899,6 +964,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       usage |= GPUTextureUsage.RENDER_ATTACHMENT;
     }
     const gpuTexture = this.device.createTexture({
+      label: `venus:image:${image}`,
       size: { width: info.width, height: info.height, depthOrArrayLayers: 1 },
       format,
       usage,
@@ -1032,6 +1098,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     );
 
     const gpuPipeline = this.device.createRenderPipeline({
+      label: `venus:renderPipeline:${pipeline}`,
       layout: pipelineLayout,
       vertex: {
         module: vs.module,
@@ -1233,6 +1300,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       });
     }
     const bg = this.device.createBindGroup({
+      label: `venus:bindGroup:${set.handle}`,
       layout,
       entries,
     });

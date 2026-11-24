@@ -44,7 +44,7 @@ Requires [Bun](https://bun.sh/) and a WebGPU-capable browser (such as Chrome).
 
 ```bash
 bun install
-bun test          # Unit + E2E tests (headless MockGPUDevice + real naga-wasm)
+bun run check     # Typecheck + unit/E2E tests + build
 bun run demo      # Start the local demo server at http://localhost:4173
 ```
 
@@ -58,11 +58,9 @@ Drop `UnkernelVenusBackend` into `unkernel` to give guest Linux programs hardwar
 
 ```ts
 import { createKernel } from "unkernel";
-import { UnkernelVenusBackend } from "venus-webgpu/unkernel";
+import { createUnkernelVenusBackend } from "venus-webgpu/unkernel";
 
-const adapter = await navigator.gpu.requestAdapter();
-const device = await adapter!.requestDevice();
-const gpuBackend = new UnkernelVenusBackend(device);
+const gpuBackend = await createUnkernelVenusBackend();
 
 // Note: `worker: false` is required so the inline WebGPU backend runs on the main/UI thread.
 const kernel = await createKernel({ gpu: true, gpuBackend, worker: false });

@@ -2,6 +2,7 @@ import {
   createCubeFragmentSpirv,
   createCubeVertexSpirv,
   createVectorAddSpirv,
+  requestWebGpuDevice,
   SpirvTranslator,
   VenusCommandDecoder,
   VenusCommandEncoder,
@@ -44,17 +45,14 @@ window.venusDemo = {
   lastError: null,
 };
 
-async function requestWebGpuDevice(): Promise<GPUDevice> {
-  if (!navigator.gpu) {
-    throw new Error("WebGPU is not supported in this browser.");
+let cachedDevice: GPUDevice | null = null;
+let activeBackend: WebGpuVenusBackend | null = null;
+
+async function getDevice(): Promise<GPUDevice> {
+  if (!cachedDevice) {
+    cachedDevice = await requestWebGpuDevice();
   }
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error("No WebGPU adapter found.");
-  const device = await adapter.requestDevice();
-  device.addEventListener("uncapturederror", (e) =>
-    console.error("[WebGPU uncapturederror]", e.error?.message ?? e),
-  );
-  return device;
+  return cachedDevice;
 }
 
 function showError(err: unknown): void {
@@ -70,7 +68,8 @@ function showError(err: unknown): void {
 btn.addEventListener("click", async () => {
   out.textContent = "Initializing WebGPU & naga-wasm...";
   try {
-    const device = await requestWebGpuDevice();
+    const device = await getDevice();
+    activeBackend?.reset();
 
     const translator = new SpirvTranslator();
     const spirv = createVectorAddSpirv();
@@ -79,6 +78,7 @@ btn.addEventListener("click", async () => {
     const N = 4096;
     const BYTE_SIZE = BigInt(N * 4);
     const backend = new WebGpuVenusBackend({ device, translator });
+    activeBackend = backend;
     const decoder = new VenusCommandDecoder(backend);
 
     const enc = new VenusCommandEncoder();
@@ -270,7 +270,8 @@ cubeBtn.addEventListener("click", async () => {
   out.textContent = "Initializing 3D Cube via Venus -> naga-wasm -> WebGPU...";
   window.venusDemo.status = "cube-init";
   try {
-    const device = await requestWebGpuDevice();
+    const device = await getDevice();
+    activeBackend?.reset();
     const ctx = canvas.getContext("webgpu");
     if (!ctx) throw new Error("Could not get WebGPU canvas context.");
 
@@ -286,6 +287,7 @@ cubeBtn.addEventListener("click", async () => {
     const vsSpirv = createCubeVertexSpirv();
     const fsSpirv = createCubeFragmentSpirv();
     const backend = new WebGpuVenusBackend({ device, translator, canvasContext: ctx });
+    activeBackend = backend;
     const decoder = new VenusCommandDecoder(backend);
 
     // 8 vertices: (x, y, z, r, g, b)
@@ -435,17 +437,21 @@ cubeBtn.addEventListener("click", async () => {
 
     const renderFrame = async (timeMs: number) => {
       if (runId !== cubeRunId) return;
-      const mvp = buildMvpMatrix(timeMs * 0.001, canvas.width / canvas.height);
-      uboBytes.set(new Uint8Array(mvp.buffer));
-      const frameEnc = new VenusCommandEncoder();
-      frameEnc.vkFlushMappedMemoryRanges(DEV, [{ memory: MEM_U, offset: 0n, size: 64n }]);
-      frameEnc.vkQueueSubmit(QUEUE, [{ waitSemaphores: [], commandBuffers: [CMD_BUF], signalSemaphores: [] }], FENCE);
-      frameEnc.vkQueuePresentKHR(QUEUE, IMG_C);
-      ring.write(frameEnc.finish());
-      await decoder.execute(ring.consumeAvailable());
-      if (runId !== cubeRunId) return;
-      window.venusDemo.frames++;
-      cubeAnimId = requestAnimationFrame((t) => void renderFrame(t));
+      try {
+        const mvp = buildMvpMatrix(timeMs * 0.001, canvas.width / canvas.height);
+        uboBytes.set(new Uint8Array(mvp.buffer));
+        const frameEnc = new VenusCommandEncoder();
+        frameEnc.vkFlushMappedMemoryRanges(DEV, [{ memory: MEM_U, offset: 0n, size: 64n }]);
+        frameEnc.vkQueueSubmit(QUEUE, [{ waitSemaphores: [], commandBuffers: [CMD_BUF], signalSemaphores: [] }], FENCE);
+        frameEnc.vkQueuePresentKHR(QUEUE, IMG_C);
+        ring.write(frameEnc.finish());
+        await decoder.execute(ring.consumeAvailable());
+        if (runId !== cubeRunId) return;
+        window.venusDemo.frames++;
+        cubeAnimId = requestAnimationFrame((t) => void renderFrame(t));
+      } catch (err) {
+        showError(err);
+      }
     };
     cubeAnimId = requestAnimationFrame((t) => void renderFrame(t));
   } catch (err) {

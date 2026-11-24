@@ -73,13 +73,17 @@ export class VenusRing {
     this.storeU32(this.cfg.statusOffset, val);
   }
 
-  /** Number of unread bytes available in the ring. */
-  get available(): number {
-    const avail = (this.tail - this.head) >>> 0;
+  private checkedAvailable(head: number, tail: number): number {
+    const avail = (tail - head) >>> 0;
     if (avail > this.cfg.bufferSize) {
       throw new Error(`VenusRing corrupted: available ${avail} > bufferSize ${this.cfg.bufferSize}`);
     }
     return avail;
+  }
+
+  /** Number of unread bytes available in the ring. */
+  get available(): number {
+    return this.checkedAvailable(this.head, this.tail);
   }
 
   /** Number of free bytes available for writing. */

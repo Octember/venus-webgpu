@@ -4,6 +4,24 @@
   "description": "Venus (virtio-gpu Vulkan) to WebGPU bridge for browser Linux",
   "type": "module",
   "license": "MIT",
+  "sideEffects": false,
+  "keywords": [
+    "vulkan",
+    "venus",
+    "virtio-gpu",
+    "webgpu",
+    "spirv",
+    "wgsl",
+    "unkernel"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noahbuiltit/venus-webgpu.git"
+  },
+  "homepage": "https://github.com/noahbuiltit/venus-webgpu#readme",
+  "bugs": {
+    "url": "https://github.com/noahbuiltit/venus-webgpu/issues"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -22,11 +40,22 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/index.ts --outdir dist --target browser --external naga-wasm && bun build src/transport/unkernel.ts --outdir dist/transport --target browser --external naga-wasm && bun build demo/demo.ts --outdir demo/dist --target browser && cp node_modules/naga-wasm/dist/wasm/naga_bg.wasm demo/dist/naga_bg.wasm && cp node_modules/naga-wasm/dist/wasm/naga_bg.wasm dist/naga_bg.wasm && tsc -p tsconfig.build.json && find dist -name '*.d.ts' -exec sed -i.bak 's/\\.ts\";/.js\";/g' {} + && find dist -name '*.d.ts.bak' -delete",
-    "demo": "bun run demo/serve.ts"
+    "build": "bun scripts/build.ts",
+    "dev": "bun run demo",
+    "demo": "bun run demo/serve.ts",
+    "check": "bun run typecheck && bun test && bun run build",
+    "prepublishOnly": "bun run check"
   },
   "dependencies": {
     "naga-wasm": "^30.2.0"
+  },
+  "peerDependencies": {
+    "@webgpu/types": ">=0.1.40"
+  },
+  "peerDependenciesMeta": {
+    "@webgpu/types": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -12,12 +12,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun test
-      - run: bun run typecheck
-      - run: bun run build
-      - name: Assert no .ts import specifiers in dist/**/*.d.ts
-        run: |
-          if grep -rnE "from ['\"].*\.ts['\"]" dist/; then
-            echo "Found .ts import specifier in dist/"
-            exit 1
-          fi
+      - run: bun run check
+      - run: npm pack --dry-run

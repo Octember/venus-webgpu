@@ -2,6 +2,7 @@ import {
   VK_COMMAND_GENERATE_REPLY_BIT_EXT,
   VK_COMMAND_TYPE,
   VK_RESULT,
+  vkCommandName,
 } from "./constants.ts";
 import type {
   VenusCommandHandler,
@@ -13,6 +14,10 @@ import type {
 } from "./types.ts";
 import { VenusCsDecoder, VenusCsEncoder } from "./wire.ts";
 
+export interface VenusCommandDecoderOptions {
+  onCommand?: (type: number, byteOffset: number) => void;
+}
+
 /**
  * Decodes a Venus command stream and dispatches each command to a
  * VenusCommandHandler, writing replies to a VenusCsEncoder when
@@ -20,9 +25,11 @@ import { VenusCsDecoder, VenusCsEncoder } from "./wire.ts";
  */
 export class VenusCommandDecoder {
   private readonly handler: VenusCommandHandler;
+  private readonly onCommand?: (type: number, byteOffset: number) => void;
 
-  constructor(handler: VenusCommandHandler) {
+  constructor(handler: VenusCommandHandler, options?: VenusCommandDecoderOptions) {
     this.handler = handler;
+    this.onCommand = options?.onCommand;
   }
 
   async execute(stream: Uint8Array, replyEncoder?: VenusCsEncoder): Promise<Uint8Array> {
@@ -30,11 +37,17 @@ export class VenusCommandDecoder {
     const reply = replyEncoder ?? new VenusCsEncoder();
 
     while (dec.remaining >= 8) {
+      const cmdOffset = dec.position;
       const commandType = dec.readU32();
       const commandFlags = dec.readU32();
       const wantsReply = (commandFlags & VK_COMMAND_GENERATE_REPLY_BIT_EXT) !== 0;
+      this.onCommand?.(commandType, cmdOffset);
 
-      await this.dispatch(commandType, commandFlags, wantsReply, dec, reply);
+      await this.dispatch(commandType, commandFlags, wantsReply, dec, reply, cmdOffset);
+    }
+
+    if (dec.remaining > 0) {
+      throw new RangeError(`Trailing ${dec.remaining} unread bytes in Venus command stream at offset ${dec.position}`);
     }
 
     return reply.finish();
@@ -95,6 +108,7 @@ export class VenusCommandDecoder {
     wantsReply: boolean,
     dec: VenusCsDecoder,
     reply: VenusCsEncoder,
+    cmdOffset: number,
   ): Promise<void> {
     switch (type) {
       case VK_COMMAND_TYPE.vkCreateInstance: {
@@ -1142,7 +1156,9 @@ export class VenusCommandDecoder {
       }
 
       default:
-        throw new Error(`Unsupported Venus command type: ${type}`);
+        throw new Error(
+          `Unsupported Venus command: ${vkCommandName(type)} (id=${type}, 0x${type.toString(16)}) at byte offset ${cmdOffset}`,
+        );
     }
   }
 }

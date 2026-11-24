@@ -24,6 +24,10 @@ export class SpirvTranslator {
   private initPromise: Promise<void> | null = null;
   private readonly cache = new Map<string, string>();
 
+  get cacheSize(): number {
+    return this.cache.size;
+  }
+
   async ensureInit(wasmInput?: InitInput): Promise<void> {
     if (!this.initPromise) {
       this.initPromise = init(wasmInput)
@@ -37,7 +41,15 @@ export class SpirvTranslator {
   }
 
   async translateToWgsl(code: Uint32Array | Uint8Array): Promise<{ wgsl: string; hash: string }> {
+    if (code.byteLength % 4 !== 0) {
+      throw new RangeError(`SPIR-V byteLength must be a multiple of 4 (got ${code.byteLength})`);
+    }
     const words = toUint32Array(code);
+    if (words.length < 5 || words[0] !== 0x07230203) {
+      throw new Error(
+        `Invalid SPIR-V magic header: expected 0x07230203, got 0x${(words[0] ?? 0).toString(16)}`,
+      );
+    }
     const hash = fnv1a64(words);
     const cached = this.cache.get(hash);
     if (cached !== undefined) {
@@ -102,7 +114,7 @@ function createSpirvBuilder(bound: number, generator = 0) {
  *   }
  */
 export function createVectorAddSpirv(): Uint32Array {
-  const { words, emit, strWords } = createSpirvBuilder(27, 0);
+  const { emit, strWords, finish } = createSpirvBuilder(27, 0);
 
   // IDs
   const ID_MAIN = 1;
@@ -131,7 +143,6 @@ export function createVectorAddSpirv(): Uint32Array {
   const ID_VAL_A = 24;
   const ID_VAL_B = 25;
   const ID_SUM = 26;
-  const BOUND = 27;
 
   // SPIR-V Header: Magic, Version 1.3, Generator, Bound, Schema
 
@@ -199,7 +210,7 @@ export function createVectorAddSpirv(): Uint32Array {
   emit(253); // OpReturn
   emit(56); // OpFunctionEnd
 
-  return new Uint32Array(words);
+  return finish();
 }
 
 /**

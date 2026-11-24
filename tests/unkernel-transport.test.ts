@@ -211,4 +211,25 @@ describe("UnkernelVenusBackend", () => {
     expect(mem.mappedOffset).toBe(0);
     expect(mem.mappedSize).toBe(0);
   });
+
+  test("supports UnkernelVenusBackend({ device }) options, getStats(), vkCommandName, and requestWebGpuDevice errors", async () => {
+    const { requestWebGpuDevice, vkCommandName, VK_COMMAND_TYPE } = await import("../src/index.ts");
+    const device = createMockGPUDevice();
+    const backend = new UnkernelVenusBackend({ device, debug: true });
+    expect(backend.getStats()).toEqual({
+      inFlight: 0,
+      contexts: 0,
+      blobs: 0,
+      scanouts: 0,
+      buffers: 0,
+      memories: 0,
+      shaders: 0,
+      pipelines: 0,
+      images: 0,
+      shaderCacheSize: 0,
+    });
+    expect(vkCommandName(VK_COMMAND_TYPE.vkCreateInstance)).toBe("vkCreateInstance");
+    expect(vkCommandName(999999)).toBe("unknown(999999)");
+    await expect(requestWebGpuDevice()).rejects.toThrow("WebGPU is unavailable");
+  });
 });

@@ -1,6 +1,14 @@
-import { WebGpuVenusBackend } from "../backend/webgpu-backend.ts";
+import {
+  requestWebGpuDevice,
+  type RequestWebGpuDeviceOptions,
+  WebGpuVenusBackend,
+  type WebGpuVenusBackendOptions,
+  type WebGpuVenusStats,
+} from "../backend/webgpu-backend.ts";
 import { encodeVenusCapset, VENUS_CAPSET_SIZE, VIRTIO_GPU_CAPSET_VENUS } from "../protocol/constants.ts";
 import { VenusCommandDecoder } from "../protocol/decoder.ts";
+
+export { requestWebGpuDevice, type RequestWebGpuDeviceOptions };
 
 /**
  * Minimal unkernel virtio-gpu types matching pithings/unkernel's js/core/virtio-gpu.ts.
@@ -107,9 +115,29 @@ function writeReplyToGuestMemory(
   }
 }
 
+export interface UnkernelVenusBackendOptions extends WebGpuVenusBackendOptions {
+  onCommand?: (type: number, byteOffset: number) => void;
+}
+
+export interface CreateUnkernelVenusBackendOptions extends Omit<UnkernelVenusBackendOptions, "device"> {
+  device?: GPUDevice;
+  adapterOptions?: GPURequestAdapterOptions;
+  deviceDescriptor?: GPUDeviceDescriptor;
+  wasmInput?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+}
+
+export interface UnkernelVenusStats extends WebGpuVenusStats {
+  inFlight: number;
+  contexts: number;
+  blobs: number;
+  scanouts: number;
+}
+
 /**
  * Adapts WebGpuVenusBackend + VenusCommandDecoder to unkernel's GpuBackend interface.
  * Unkernel's VirtioGpu awaits returned Promises and signals the guest fence via JSPI.
+ * @example
+ * const gpuBackend = await createUnkernelVenusBackend();
  */
 export class UnkernelVenusBackend implements UnkernelGpuBackend {
   readonly features = VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_RESOURCE_BLOB | VIRTIO_GPU_F_CONTEXT_INIT;
@@ -120,12 +148,26 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
   private readonly contexts = new Set<number>();
   private readonly blobs = new Map<number, BlobResource>();
   private readonly scanouts = new Map<number, ScanoutInfo>();
+  private readonly onError: (err: unknown) => void;
   private inFlight = 0;
   private tail: Promise<void> = Promise.resolve();
 
-  constructor(device: GPUDevice) {
-    this.backend = new WebGpuVenusBackend({ device });
-    this.decoder = new VenusCommandDecoder(this.backend);
+  constructor(deviceOrOptions: GPUDevice | UnkernelVenusBackendOptions) {
+    const opts: UnkernelVenusBackendOptions =
+      "device" in deviceOrOptions ? deviceOrOptions : { device: deviceOrOptions };
+    this.onError = opts.onError ?? ((err) => console.error("[UnkernelVenusBackend]", err));
+    this.backend = new WebGpuVenusBackend(opts);
+    this.decoder = new VenusCommandDecoder(this.backend, { onCommand: opts.onCommand });
+  }
+
+  getStats(): UnkernelVenusStats {
+    return {
+      inFlight: this.inFlight,
+      contexts: this.contexts.size,
+      blobs: this.blobs.size,
+      scanouts: this.scanouts.size,
+      ...this.backend.getStats(),
+    };
   }
 
   resource(id: number): { width: number; height: number } | null {
@@ -312,7 +354,7 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
             }
             return respHeader(UNKERNEL_GPU_RESP.OK_NODATA);
           } catch (err) {
-            console.error("[UnkernelVenusBackend] SUBMIT_3D failed:", err);
+            this.onError(err);
             return respHeader(UNKERNEL_GPU_RESP.ERR_UNSPEC);
           } finally {
             this.inFlight--;
@@ -329,4 +371,27 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
         return respHeader(UNKERNEL_GPU_RESP.ERR_UNSPEC);
     }
   }
+}
+
+/**
+ * Creates an `UnkernelVenusBackend`, acquiring a `GPUDevice` and initializing `naga-wasm` if needed.
+ * @example
+ * const gpuBackend = await createUnkernelVenusBackend();
+ */
+export async function createUnkernelVenusBackend(
+  options: CreateUnkernelVenusBackendOptions = {},
+): Promise<UnkernelVenusBackend> {
+  const { device: providedDevice, adapterOptions, deviceDescriptor, wasmInput, ...rest } = options;
+  const device =
+    providedDevice ??
+    (await requestWebGpuDevice({
+      adapterOptions,
+      deviceDescriptor,
+      onUncapturedError: rest.onError,
+    }));
+  const instance = new UnkernelVenusBackend({ ...rest, device });
+  if (wasmInput !== undefined) {
+    await instance.backend.translator.ensureInit(wasmInput);
+  }
+  return instance;
 }
