@@ -145,7 +145,7 @@ export class VenusCsEncoder {
   private ensure(extra: number): void {
     const needed = this.offset + extra;
     if (needed <= this.buf.byteLength) return;
-    let nextCap = this.buf.byteLength * 2;
+    let nextCap = Math.max(1, this.buf.byteLength) * 2;
     while (nextCap < needed) nextCap *= 2;
     const next = new Uint8Array(nextCap);
     next.set(this.buf.subarray(0, this.offset));
@@ -214,11 +214,13 @@ export class VenusCsEncoder {
 
   writeString(str: string): void {
     const encoded = textEncoder.encode(str);
-    const withNul = new Uint8Array(encoded.byteLength + 1);
-    withNul.set(encoded);
-    withNul[encoded.byteLength] = 0;
-    this.writeArraySize(withNul.byteLength);
-    this.writeBytes(withNul);
+    const totalLen = encoded.byteLength + 1;
+    this.writeArraySize(totalLen);
+    const padded = align4(totalLen);
+    this.ensure(padded);
+    this.buf.set(encoded, this.offset);
+    this.buf.fill(0, this.offset + encoded.byteLength, this.offset + padded);
+    this.offset += padded;
   }
 
   finish(): Uint8Array {

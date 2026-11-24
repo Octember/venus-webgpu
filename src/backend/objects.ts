@@ -9,7 +9,7 @@ export interface VenusDeviceMemory {
   size: number;
   memoryTypeIndex: number;
   gpuBuffer: GPUBuffer;
-  hostData: Uint8Array | null;
+  hostData: Uint8Array<ArrayBuffer> | null;
   mappedOffset: number;
   mappedSize: number;
   dirty: boolean;
@@ -108,9 +108,7 @@ export interface VenusDescriptorSet {
   handle: VkHandle;
   layout: VenusDescriptorSetLayout;
   bindings: Map<number, VenusDescriptorBinding>;
-  gpuBindGroup: GPUBindGroup | null;
-  gpuBindGroupsByLayout?: WeakMap<GPUBindGroupLayout, GPUBindGroup>;
-  dirty: boolean;
+  gpuBindGroupsByLayout: WeakMap<GPUBindGroupLayout, GPUBindGroup>;
 }
 
 export type RecordedCommand =
@@ -144,7 +142,6 @@ export type RecordedCommand =
 
 export interface VenusCommandBuffer {
   handle: VkHandle;
-  recording: boolean;
   commands: RecordedCommand[];
 }
 
@@ -179,6 +176,9 @@ export class VenusObjectTable {
     for (const mem of this.memories.values()) {
       mem.gpuBuffer.destroy();
     }
+    for (const img of this.images.values()) {
+      img.gpuTexture.destroy();
+    }
     this.instances.clear();
     this.physicalDevices.clear();
     this.devices.clear();
@@ -188,9 +188,6 @@ export class VenusObjectTable {
     this.shaderModules.clear();
     this.descriptorSetLayouts.clear();
     this.pipelineLayouts.clear();
-    for (const img of this.images.values()) {
-      img.gpuTexture.destroy();
-    }
     this.pipelines.clear();
     this.images.clear();
     this.imageViews.clear();

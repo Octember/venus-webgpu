@@ -26,6 +26,30 @@ export class VenusCommandEncoder {
     this.cs.writeU32(reply ? VK_COMMAND_GENERATE_REPLY_BIT_EXT : 0);
   }
 
+  private writeHandles(handles: readonly VkHandle[]): void {
+    this.cs.writeU32(handles.length);
+    for (const h of handles) this.cs.writeHandle(h);
+  }
+
+  private writeMappedMemoryRanges(device: VkHandle, ranges: readonly VkMappedMemoryRange[]): void {
+    this.cs.writeHandle(device);
+    this.cs.writeU32(ranges.length);
+    for (const r of ranges) {
+      this.cs.writeHandle(r.memory);
+      this.cs.writeU64(r.offset);
+      this.cs.writeU64(r.size);
+    }
+  }
+
+  private writeAttachment(att?: { format: number; loadOp: number; storeOp: number }): void {
+    this.cs.writeBool32(Boolean(att));
+    if (att) {
+      this.cs.writeU32(att.format);
+      this.cs.writeU32(att.loadOp);
+      this.cs.writeU32(att.storeOp);
+    }
+  }
+
   vkCreateInstance(instance: VkHandle, reply = true): void {
     this.header(VK_COMMAND_TYPE.vkCreateInstance, reply);
     this.cs.writeHandle(instance);
@@ -441,18 +465,8 @@ export class VenusCommandEncoder {
   vkCreateRenderPass(device: VkHandle, info: VkRenderPassCreateInfo, renderPass: VkHandle, reply = false): void {
     this.header(VK_COMMAND_TYPE.vkCreateRenderPass, reply);
     this.cs.writeHandle(device);
-    this.cs.writeU32(info.colorAttachment ? 1 : 0);
-    if (info.colorAttachment) {
-      this.cs.writeU32(info.colorAttachment.format);
-      this.cs.writeU32(info.colorAttachment.loadOp);
-      this.cs.writeU32(info.colorAttachment.storeOp);
-    }
-    this.cs.writeU32(info.depthAttachment ? 1 : 0);
-    if (info.depthAttachment) {
-      this.cs.writeU32(info.depthAttachment.format);
-      this.cs.writeU32(info.depthAttachment.loadOp);
-      this.cs.writeU32(info.depthAttachment.storeOp);
-    }
+    this.writeAttachment(info.colorAttachment);
+    this.writeAttachment(info.depthAttachment);
     this.cs.writeHandle(renderPass);
   }
 
@@ -507,8 +521,8 @@ export class VenusCommandEncoder {
     }
     this.cs.writeU32(info.topology);
     this.cs.writeU32(info.cullMode);
-    this.cs.writeU32(info.depthTestEnable ? 1 : 0);
-    this.cs.writeU32(info.depthWriteEnable ? 1 : 0);
+    this.cs.writeBool32(info.depthTestEnable);
+    this.cs.writeBool32(info.depthWriteEnable);
     this.cs.writeU32(info.depthCompareOp);
     this.cs.writeHandle(info.layout);
     this.cs.writeHandle(info.renderPass);

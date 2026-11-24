@@ -19,6 +19,11 @@ function makeCmd(type: number, ctxId = 0, payloadBytes = 0): Uint8Array {
   return buf;
 }
 
+function respType(resp: Uint8Array | null): number {
+  if (!resp) throw new Error("Expected non-null response");
+  return new DataView(resp.buffer, resp.byteOffset, resp.byteLength).getUint32(0, true);
+}
+
 describe("UnkernelVenusBackend", () => {
   test("exposes Venus features, capset, context lifecycle, and SUBMIT_3D", async () => {
     const device = createMockGPUDevice();
@@ -157,11 +162,53 @@ describe("UnkernelVenusBackend", () => {
     sub2.set(s2, 28);
 
     const [r1, r2] = await Promise.all([backend.command(sub1, ctx), backend.command(sub2, ctx)]);
-    expect(new DataView(r1!.buffer).getUint32(0, true)).toBe(UNKERNEL_GPU_RESP.OK_NODATA);
-    expect(new DataView(r2!.buffer).getUint32(0, true)).toBe(UNKERNEL_GPU_RESP.OK_NODATA);
+    expect(respType(r1)).toBe(UNKERNEL_GPU_RESP.OK_NODATA);
+    expect(respType(r2)).toBe(UNKERNEL_GPU_RESP.OK_NODATA);
 
     // Reply bytes from vkEnumeratePhysicalDevices should be written at guest addr 512
     const guestReply = new Uint8Array(wasmMem.buffer, 512, 16);
     expect(guestReply.some((b) => b !== 0)).toBe(true);
+  });
+
+  test("honors replyStream.position when writing SUBMIT_3D reply bytes", async () => {
+    const device = createMockGPUDevice();
+    const backend = new UnkernelVenusBackend(device);
+    const wasmMem = new WebAssembly.Memory({ initial: 1 });
+    const ctx = {
+      memory: () => wasmMem,
+      backing: () => [{ addr: 1024, len: 256 }],
+    };
+
+    const enc = new VenusCommandEncoder();
+    enc.vkSetReplyCommandStreamMESA(1, 0n, 256n);
+    enc.vkSeekReplyCommandStreamMESA(32n);
+    enc.vkCreateInstance(1n);
+    const stream = enc.finish();
+
+    const sub = makeCmd(UNKERNEL_GPU_CMD.SUBMIT_3D, 1, 4 + stream.byteLength);
+    new DataView(sub.buffer).setUint32(24, stream.byteLength, true);
+    sub.set(stream, 28);
+
+    const resp = await backend.command(sub, ctx);
+    expect(respType(resp)).toBe(UNKERNEL_GPU_RESP.OK_NODATA);
+
+    const beforePos = new Uint8Array(wasmMem.buffer, 1024, 32);
+    const atPos = new Uint8Array(wasmMem.buffer, 1024 + 32, 12);
+    expect(beforePos.every((b) => b === 0)).toBe(true);
+    expect(atPos.some((b) => b !== 0)).toBe(true);
+  });
+
+  test("vkUnmapMemory clears mappedOffset and mappedSize", () => {
+    const device = createMockGPUDevice();
+    const backend = new UnkernelVenusBackend(device);
+    backend.backend.vkAllocateMemory(1n, 64n, 1, 10n);
+    backend.backend.vkMapMemory(1n, 10n, 16n, 32n);
+    const mem = backend.backend.objects.memories.get(10n)!;
+    expect(mem.mappedOffset).toBe(16);
+    expect(mem.mappedSize).toBe(32);
+
+    backend.backend.vkUnmapMemory(1n, 10n);
+    expect(mem.mappedOffset).toBe(0);
+    expect(mem.mappedSize).toBe(0);
   });
 });

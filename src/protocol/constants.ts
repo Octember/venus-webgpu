@@ -231,6 +231,8 @@ export const VK_PHYSICAL_DEVICE_TYPE = {
   CPU: 4,
 } as const;
 
+export const VK_WHOLE_SIZE = 0xffffffffffffffffn;
+
 /** Virtio-GPU Venus capset (virglrenderer/src/venus_hw.h). */
 export const VIRTIO_GPU_CAPSET_VENUS = 4;
 export const VENUS_WIRE_FORMAT_VERSION = 1;

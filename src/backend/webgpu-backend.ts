@@ -1,19 +1,29 @@
 import {
-  VK_ATTACHMENT_LOAD_OP,
-  VK_ATTACHMENT_STORE_OP,
-  VK_COMPARE_OP,
-  VK_CULL_MODE,
   VK_DESCRIPTOR_TYPE,
-  VK_FORMAT,
   VK_IMAGE_USAGE,
   VK_INDEX_TYPE,
   VK_MEMORY_PROPERTY,
   VK_PHYSICAL_DEVICE_TYPE,
-  VK_PRIMITIVE_TOPOLOGY,
   VK_QUEUE_FLAGS,
   VK_RESULT,
+  VK_SHADER_STAGE,
   type VkResult,
 } from "../protocol/constants.ts";
+import {
+  buildBindGroupLayoutEntry,
+  isDynamicDescriptor,
+  isStorageDescriptor,
+  reflectStorageAccess,
+  resolveWholeSize,
+  vkCompareOpToWebGpu,
+  vkCullModeToWebGpu,
+  vkFormatToWebGpu,
+  vkLoadOpToWebGpu,
+  vkStoreOpToWebGpu,
+  vkTopologyToWebGpu,
+  vkVertexFormatToWebGpu,
+} from "./vk-to-webgpu.ts";
+export { reflectStorageAccess };
 import type {
   VenusCommandHandler,
   VkDescriptorSetLayoutBinding,
@@ -36,6 +46,8 @@ import type {
 import { SpirvTranslator } from "../shader/spirv.ts";
 import {
   VenusObjectTable,
+  type RecordedCommand,
+  type VenusCommandBuffer,
   type VenusDescriptorSet,
   type VenusDeviceMemory,
   type VenusPipeline,
@@ -55,101 +67,6 @@ export interface WebGpuVenusBackendOptions {
   canvasContext?: GPUCanvasContext;
 }
 
-function vkFormatToWebGpu(format: number): GPUTextureFormat {
-  switch (format) {
-    case VK_FORMAT.B8G8R8A8_UNORM:
-      return "bgra8unorm";
-    case VK_FORMAT.D32_SFLOAT:
-      return "depth32float";
-    case VK_FORMAT.D24_UNORM_S8_UINT:
-      return "depth24plus-stencil8";
-    case VK_FORMAT.R8G8B8A8_UNORM:
-    default:
-      return "rgba8unorm";
-  }
-}
-
-function vkVertexFormatToWebGpu(format: number): GPUVertexFormat {
-  switch (format) {
-    case VK_FORMAT.R32G32_SFLOAT:
-      return "float32x2";
-    case VK_FORMAT.R32G32B32A32_SFLOAT:
-      return "float32x4";
-    case VK_FORMAT.R32G32B32_SFLOAT:
-    default:
-      return "float32x3";
-  }
-}
-
-function vkTopologyToWebGpu(topology: number): GPUPrimitiveTopology {
-  switch (topology) {
-    case VK_PRIMITIVE_TOPOLOGY.POINT_LIST:
-      return "point-list";
-    case VK_PRIMITIVE_TOPOLOGY.LINE_LIST:
-      return "line-list";
-    case VK_PRIMITIVE_TOPOLOGY.LINE_STRIP:
-      return "line-strip";
-    case VK_PRIMITIVE_TOPOLOGY.TRIANGLE_STRIP:
-      return "triangle-strip";
-    case VK_PRIMITIVE_TOPOLOGY.TRIANGLE_LIST:
-    default:
-      return "triangle-list";
-  }
-}
-
-function vkCullModeToWebGpu(cullMode: number): GPUCullMode {
-  switch (cullMode) {
-    case VK_CULL_MODE.FRONT:
-      return "front";
-    case VK_CULL_MODE.BACK:
-      return "back";
-    case VK_CULL_MODE.NONE:
-    default:
-      return "none";
-  }
-}
-
-function vkCompareOpToWebGpu(op: number): GPUCompareFunction {
-  switch (op) {
-    case VK_COMPARE_OP.NEVER:
-      return "never";
-    case VK_COMPARE_OP.EQUAL:
-      return "equal";
-    case VK_COMPARE_OP.LESS_OR_EQUAL:
-      return "less-equal";
-    case VK_COMPARE_OP.GREATER:
-      return "greater";
-    case VK_COMPARE_OP.NOT_EQUAL:
-      return "not-equal";
-    case VK_COMPARE_OP.GREATER_OR_EQUAL:
-      return "greater-equal";
-    case VK_COMPARE_OP.ALWAYS:
-      return "always";
-    case VK_COMPARE_OP.LESS:
-    default:
-      return "less";
-  }
-}
-
-export function reflectStorageAccess(
-  wgslSources: string[],
-): Map<string, "read-only-storage" | "storage"> {
-  const access = new Map<string, "read-only-storage" | "storage">();
-  const re = /@group\(\s*(\d+)\s*\)\s*@binding\(\s*(\d+)\s*\)\s*var<\s*storage(?:\s*,\s*(read|read_write))?\s*>/g;
-  for (const src of wgslSources) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(src)) !== null) {
-      const key = `${m[1]}:${m[2]}`;
-      const mode = m[3] === "read_write" ? "storage" : "read-only-storage";
-      if (access.get(key) !== "storage") {
-        access.set(key, mode);
-      }
-    }
-  }
-  return access;
-}
-
 export class WebGpuVenusBackend implements VenusCommandHandler {
   readonly device: GPUDevice;
   readonly translator: SpirvTranslator;
@@ -157,6 +74,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   private canvasContext?: GPUCanvasContext;
   private pendingWork: Promise<void> = Promise.resolve();
   private readonly rings = new Map<bigint, VkRingCreateInfoMESA>();
+  private replyStream: { resourceId: number; offset: number; size: number; position: number } | null = null;
 
   constructor(opts: WebGpuVenusBackendOptions) {
     this.device = opts.device;
@@ -164,12 +82,19 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     this.canvasContext = opts.canvasContext;
   }
 
+  reset(): void {
+    this.objects.clear();
+    this.rings.clear();
+    this.replyStream = null;
+    this.pendingWork = Promise.resolve();
+  }
+
   setCanvasContext(ctx: GPUCanvasContext): void {
     this.canvasContext = ctx;
   }
 
   /** Expose host-visible backing memory for direct guest/test reads & writes. */
-  getMemoryHostData(memory: VkHandle): Uint8Array | null {
+  getMemoryHostData(memory: VkHandle): Uint8Array<ArrayBuffer> | null {
     return this.objects.memories.get(memory)?.hostData ?? null;
   }
 
@@ -214,7 +139,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   vkGetPhysicalDeviceQueueFamilyProperties(_physicalDevice: VkHandle): VkQueueFamilyProperties[] {
     return [
       {
-        queueFlags: VK_QUEUE_FLAGS.COMPUTE | VK_QUEUE_FLAGS.TRANSFER,
+        queueFlags: VK_QUEUE_FLAGS.GRAPHICS | VK_QUEUE_FLAGS.COMPUTE | VK_QUEUE_FLAGS.TRANSFER,
         queueCount: 1,
         timestampValidBits: 64,
       },
@@ -295,7 +220,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const mem = this.objects.memories.get(memory);
     if (!mem || !mem.hostData) return VK_RESULT.VK_ERROR_MEMORY_MAP_FAILED;
     mem.mappedOffset = Number(offset);
-    mem.mappedSize = size === 0xffffffffffffffffn ? mem.size - mem.mappedOffset : Number(size);
+    mem.mappedSize = resolveWholeSize(size, mem.size, mem.mappedOffset);
     mem.dirty = true;
     return VK_RESULT.VK_SUCCESS;
   }
@@ -304,6 +229,8 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const mem = this.objects.memories.get(memory);
     if (mem && mem.hostData) {
       mem.dirty = true;
+      mem.mappedOffset = 0;
+      mem.mappedSize = 0;
     }
   }
 
@@ -312,19 +239,11 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       const mem = this.objects.memories.get(r.memory);
       if (mem?.hostData) {
         const off = Number(r.offset) & ~3;
-        const end =
-          r.size === 0xffffffffffffffffn
-            ? mem.size
-            : Math.min(mem.size, alignUp(Number(r.offset) + Number(r.size), 4));
+        const size = resolveWholeSize(r.size, mem.size, Number(r.offset));
+        const end = Math.min(mem.size, alignUp(Number(r.offset) + size, 4));
         const len = Math.max(0, end - off);
         if (len > 0) {
-          this.device.queue.writeBuffer(
-            mem.gpuBuffer,
-            off,
-            mem.hostData as Uint8Array<ArrayBuffer>,
-            off,
-            len,
-          );
+          this.device.queue.writeBuffer(mem.gpuBuffer, off, mem.hostData, off, len);
         }
         mem.dirty = false;
       }
@@ -389,31 +308,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     bindings: VkDescriptorSetLayoutBinding[],
     layout: VkHandle,
   ): VkResult {
-    const entries: GPUBindGroupLayoutEntry[] = bindings.map((b) => {
-      let visibility = 0;
-      if (b.stageFlags & 0x00000001) visibility |= GPUShaderStage.VERTEX;
-      if (b.stageFlags & 0x00000010) visibility |= GPUShaderStage.FRAGMENT;
-      if (b.stageFlags & 0x00000020) visibility |= GPUShaderStage.COMPUTE;
-      if (visibility === 0) {
-        visibility = GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
-      }
-      const isUniform =
-        b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER ||
-        b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC;
-      const hasDynamicOffset =
-        b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
-        b.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC;
-      const storageType: GPUBufferBindingType =
-        (visibility & GPUShaderStage.VERTEX) !== 0 ? "read-only-storage" : "storage";
-      return {
-        binding: b.binding,
-        visibility,
-        buffer: {
-          type: isUniform ? "uniform" : storageType,
-          hasDynamicOffset,
-        },
-      };
-    });
+    const entries = bindings.map((b) => buildBindGroupLayoutEntry(b));
     const gpuLayout = this.device.createBindGroupLayout({ entries });
     this.objects.descriptorSetLayouts.set(layout, { handle: layout, bindings, gpuLayout });
     return VK_RESULT.VK_SUCCESS;
@@ -500,8 +395,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
         handle: descriptorSets[i],
         layout,
         bindings: new Map(),
-        gpuBindGroup: null,
-        dirty: true,
+        gpuBindGroupsByLayout: new WeakMap(),
       });
     }
     return VK_RESULT.VK_SUCCESS;
@@ -515,14 +409,13 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
         const info = w.bufferInfos[i];
         const buf = this.objects.buffers.get(info.buffer);
         if (!buf) continue;
-        const range =
-          info.range === 0xffffffffffffffffn ? buf.size - Number(info.offset) : Number(info.range);
+        const range = resolveWholeSize(info.range, buf.size, Number(info.offset));
         set.bindings.set(w.dstBinding + i, {
           buffer: buf,
           offset: Number(info.offset),
           range,
         });
-        set.dirty = true;
+        set.gpuBindGroupsByLayout = new WeakMap();
       }
     }
   }
@@ -538,7 +431,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
 
   vkAllocateCommandBuffers(_device: VkHandle, _pool: VkHandle, commandBuffers: VkHandle[]): VkResult {
     for (const handle of commandBuffers) {
-      this.objects.commandBuffers.set(handle, { handle, recording: false, commands: [] });
+      this.objects.commandBuffers.set(handle, { handle, commands: [] });
     }
     return VK_RESULT.VK_SUCCESS;
   }
@@ -552,7 +445,6 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   vkBeginCommandBuffer(commandBuffer: VkHandle): VkResult {
     const cb = this.objects.commandBuffers.get(commandBuffer);
     if (!cb) return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
-    cb.recording = true;
     cb.commands = [];
     return VK_RESULT.VK_SUCCESS;
   }
@@ -560,7 +452,6 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   vkEndCommandBuffer(commandBuffer: VkHandle): VkResult {
     const cb = this.objects.commandBuffers.get(commandBuffer);
     if (!cb) return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
-    cb.recording = false;
     return VK_RESULT.VK_SUCCESS;
   }
 
@@ -625,7 +516,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const dst = this.objects.buffers.get(dstHandle);
     if (cb && dst) {
       const off = Number(dstOffset);
-      const byteSize = size === 0xffffffffffffffffn ? Math.max(0, dst.size - off) : Number(size);
+      const byteSize = resolveWholeSize(size, dst.size, off);
       cb.commands.push({
         type: "fillBuffer",
         dst,
@@ -681,13 +572,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   }
 
   vkQueueSubmit(_queue: VkHandle, submits: VkSubmitInfo[], fenceHandle: VkHandle): VkResult {
-    // Flush any dirty or persistently mapped host-coherent memory to GPU before encoding.
-    for (const mem of this.objects.memories.values()) {
-      if (mem.hostData && (mem.dirty || mem.mappedSize > 0)) {
-        this.device.queue.writeBuffer(mem.gpuBuffer, 0, mem.hostData as Uint8Array<ArrayBuffer>);
-        mem.dirty = false;
-      }
-    }
+    this.flushDirtyMemories();
 
     const encoder = this.device.createCommandEncoder();
     const touchedHostMemories = new Set<VenusDeviceMemory>();
@@ -696,237 +581,9 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     for (const submit of submits) {
       for (const cbHandle of submit.commandBuffers) {
         const cb = this.objects.commandBuffers.get(cbHandle);
-        if (!cb) continue;
-
-        let computePass: GPUComputePassEncoder | null = null;
-        let renderPass: GPURenderPassEncoder | null = null;
-        let activePipeline: VenusPipeline | null = null;
-        const endPass = () => {
-          if (computePass) {
-            computePass.end();
-            computePass = null;
-          }
-          if (renderPass) {
-            renderPass.end();
-            renderPass = null;
-          }
-        };
-        const ensureComputePass = () => {
-          if (renderPass) {
-            renderPass.end();
-            renderPass = null;
-          }
-          if (!computePass) computePass = encoder.beginComputePass();
-          return computePass;
-        };
-
-        for (const cmd of cb.commands) {
-          switch (cmd.type) {
-            case "bindPipeline": {
-              activePipeline = cmd.pipeline;
-              if (cmd.pipeline.kind === "graphics" && renderPass) {
-                renderPass.setPipeline(cmd.pipeline.gpuPipeline);
-              } else if (cmd.pipeline.kind === "compute") {
-                ensureComputePass().setPipeline(cmd.pipeline.gpuPipeline);
-              }
-              break;
-            }
-            case "bindDescriptorSets": {
-              const p: GPUComputePassEncoder | GPURenderPassEncoder = renderPass ?? ensureComputePass();
-              let dynOffsetCursor = 0;
-              for (let i = 0; i < cmd.sets.length; i++) {
-                const set = cmd.sets[i];
-                const setIdx = cmd.firstSet + i;
-                const targetLayout = activePipeline?.reflectedBindGroupLayouts[setIdx] ?? set.layout.gpuLayout;
-                const bg = this.ensureBindGroup(set, targetLayout);
-                const dynCount = set.layout.bindings.filter(
-                  (b) =>
-                    b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
-                    b.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC,
-                ).length;
-                const slice = cmd.dynamicOffsets.slice(dynOffsetCursor, dynOffsetCursor + dynCount);
-                dynOffsetCursor += dynCount;
-                p.setBindGroup(setIdx, bg, slice);
-                for (const [bindingIdx, b] of set.bindings.entries()) {
-                  const layoutBinding = set.layout.bindings.find((lb) => lb.binding === bindingIdx);
-                  const reflectedAccess = activePipeline?.storageAccess.get(`${setIdx}:${bindingIdx}`);
-                  const isWritableStorage =
-                    layoutBinding &&
-                    (layoutBinding.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER ||
-                      layoutBinding.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC) &&
-                    (layoutBinding.stageFlags & 0x00000001) === 0 &&
-                    reflectedAccess !== "read-only-storage";
-                  if (isWritableStorage && b.buffer.memory?.hostData) {
-                    touchedHostMemories.add(b.buffer.memory);
-                  }
-                }
-              }
-              break;
-            }
-            case "dispatch": {
-              ensureComputePass().dispatchWorkgroups(cmd.x, cmd.y, cmd.z);
-              break;
-            }
-            case "beginRenderPass": {
-              endPass();
-              const colorView = cmd.framebuffer.attachments[0]?.gpuView;
-              const depthView = cmd.framebuffer.attachments[1]?.gpuView;
-              const rpInfo = cmd.renderPass.info;
-              const colorAttachments: GPURenderPassColorAttachment[] = colorView
-                ? [
-                    {
-                      view: colorView,
-                      clearValue: {
-                        r: cmd.clearColor[0],
-                        g: cmd.clearColor[1],
-                        b: cmd.clearColor[2],
-                        a: cmd.clearColor[3],
-                      },
-                      loadOp:
-                        rpInfo.colorAttachment?.loadOp === VK_ATTACHMENT_LOAD_OP.CLEAR
-                          ? "clear"
-                          : "load",
-                      storeOp:
-                        rpInfo.colorAttachment?.storeOp === VK_ATTACHMENT_STORE_OP.DONT_CARE
-                          ? "discard"
-                          : "store",
-                    },
-                  ]
-                : [];
-              const depthStencilAttachment: GPURenderPassDepthStencilAttachment | undefined = depthView
-                ? {
-                    view: depthView,
-                    depthClearValue: cmd.clearDepth,
-                    depthLoadOp:
-                      rpInfo.depthAttachment?.loadOp === VK_ATTACHMENT_LOAD_OP.CLEAR
-                        ? "clear"
-                        : "load",
-                    depthStoreOp:
-                      rpInfo.depthAttachment?.storeOp === VK_ATTACHMENT_STORE_OP.DONT_CARE
-                        ? "discard"
-                        : "store",
-                  }
-                : undefined;
-              renderPass = encoder.beginRenderPass({
-                colorAttachments,
-                depthStencilAttachment,
-              });
-              break;
-            }
-            case "endRenderPass": {
-              if (renderPass) {
-                renderPass.end();
-                renderPass = null;
-              }
-              break;
-            }
-            case "setViewport": {
-              renderPass?.setViewport(cmd.x, cmd.y, cmd.width, cmd.height, cmd.minDepth, cmd.maxDepth);
-              break;
-            }
-            case "setScissor": {
-              renderPass?.setScissorRect(cmd.x, cmd.y, cmd.width, cmd.height);
-              break;
-            }
-            case "bindVertexBuffers": {
-              if (renderPass) {
-                for (let i = 0; i < cmd.buffers.length; i++) {
-                  const buf = cmd.buffers[i];
-                  if (buf.memory) {
-                    renderPass.setVertexBuffer(
-                      cmd.firstBinding + i,
-                      buf.memory.gpuBuffer,
-                      buf.memoryOffset + (cmd.offsets[i] ?? 0),
-                    );
-                  }
-                }
-              }
-              break;
-            }
-            case "bindIndexBuffer": {
-              if (renderPass && cmd.buffer.memory) {
-                renderPass.setIndexBuffer(
-                  cmd.buffer.memory.gpuBuffer,
-                  cmd.indexType === VK_INDEX_TYPE.UINT16 ? "uint16" : "uint32",
-                  cmd.buffer.memoryOffset + cmd.offset,
-                );
-              }
-              break;
-            }
-            case "draw": {
-              renderPass?.draw(cmd.vertexCount, cmd.instanceCount, cmd.firstVertex, cmd.firstInstance);
-              break;
-            }
-            case "drawIndexed": {
-              renderPass?.drawIndexed(
-                cmd.indexCount,
-                cmd.instanceCount,
-                cmd.firstIndex,
-                cmd.vertexOffset,
-                cmd.firstInstance,
-              );
-              break;
-            }
-            case "copyBufferToImage": {
-              endPass();
-              if (cmd.src.memory) {
-                encoder.copyBufferToTexture(
-                  {
-                    buffer: cmd.src.memory.gpuBuffer,
-                    offset: cmd.src.memoryOffset + cmd.bufferOffset,
-                    bytesPerRow: cmd.width * 4,
-                    rowsPerImage: cmd.height,
-                  },
-                  { texture: cmd.dst.gpuTexture },
-                  { width: cmd.width, height: cmd.height, depthOrArrayLayers: 1 },
-                );
-              }
-              break;
-            }
-            case "copyBuffer": {
-              endPass();
-              if (cmd.src.memory && cmd.dst.memory) {
-                encoder.copyBufferToBuffer(
-                  cmd.src.memory.gpuBuffer,
-                  cmd.src.memoryOffset + cmd.srcOffset,
-                  cmd.dst.memory.gpuBuffer,
-                  cmd.dst.memoryOffset + cmd.dstOffset,
-                  cmd.size,
-                );
-                if (cmd.dst.memory.hostData) {
-                  touchedHostMemories.add(cmd.dst.memory);
-                }
-              }
-              break;
-            }
-            case "fillBuffer": {
-              endPass();
-              if (cmd.dst.memory && cmd.size >= 4) {
-                const alignedSize = alignUp(cmd.size, 4);
-                const words = new Uint32Array(alignedSize >>> 2);
-                words.fill(cmd.data >>> 0);
-                const staging = this.device.createBuffer({
-                  size: alignedSize,
-                  usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-                });
-                this.device.queue.writeBuffer(staging, 0, words);
-                encoder.copyBufferToBuffer(
-                  staging,
-                  0,
-                  cmd.dst.memory.gpuBuffer,
-                  cmd.dst.memoryOffset + cmd.dstOffset,
-                  alignedSize,
-                );
-                stagingBuffers.push(staging);
-                if (cmd.dst.memory.hostData) {
-                  touchedHostMemories.add(cmd.dst.memory);
-                }
-              }
-              break;
-            }
-          }
+        if (cb) {
+          this.encodeCommandBuffer(cb, encoder, touchedHostMemories, stagingBuffers);
         }
-        endPass();
       }
     }
 
@@ -958,6 +615,247 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     return VK_RESULT.VK_SUCCESS;
   }
 
+  private flushDirtyMemories(): void {
+    for (const mem of this.objects.memories.values()) {
+      if (mem.hostData && (mem.dirty || mem.mappedSize > 0)) {
+        this.device.queue.writeBuffer(mem.gpuBuffer, 0, mem.hostData);
+        mem.dirty = false;
+      }
+    }
+  }
+
+  private encodeCommandBuffer(
+    cb: VenusCommandBuffer,
+    encoder: GPUCommandEncoder,
+    touchedHostMemories: Set<VenusDeviceMemory>,
+    stagingBuffers: GPUBuffer[],
+  ): void {
+    let computePass: GPUComputePassEncoder | null = null;
+    let renderPass: GPURenderPassEncoder | null = null;
+    let activePipeline: VenusPipeline | null = null;
+    const endPass = () => {
+      if (computePass) {
+        computePass.end();
+        computePass = null;
+      }
+      if (renderPass) {
+        renderPass.end();
+        renderPass = null;
+      }
+    };
+    const ensureComputePass = () => {
+      if (renderPass) {
+        renderPass.end();
+        renderPass = null;
+      }
+      if (!computePass) computePass = encoder.beginComputePass();
+      return computePass;
+    };
+
+    for (const cmd of cb.commands) {
+      switch (cmd.type) {
+        case "bindPipeline": {
+          activePipeline = cmd.pipeline;
+          if (cmd.pipeline.kind === "graphics" && renderPass) {
+            renderPass.setPipeline(cmd.pipeline.gpuPipeline);
+          } else if (cmd.pipeline.kind === "compute") {
+            ensureComputePass().setPipeline(cmd.pipeline.gpuPipeline);
+          }
+          break;
+        }
+        case "bindDescriptorSets": {
+          const pass = renderPass ?? ensureComputePass();
+          this.bindDescriptorSets(pass, cmd, activePipeline, touchedHostMemories);
+          break;
+        }
+        case "dispatch": {
+          ensureComputePass().dispatchWorkgroups(cmd.x, cmd.y, cmd.z);
+          break;
+        }
+        case "beginRenderPass": {
+          endPass();
+          renderPass = encoder.beginRenderPass(this.buildRenderPassDescriptor(cmd));
+          break;
+        }
+        case "endRenderPass": {
+          if (renderPass) {
+            renderPass.end();
+            renderPass = null;
+          }
+          break;
+        }
+        case "setViewport": {
+          renderPass?.setViewport(cmd.x, cmd.y, cmd.width, cmd.height, cmd.minDepth, cmd.maxDepth);
+          break;
+        }
+        case "setScissor": {
+          renderPass?.setScissorRect(cmd.x, cmd.y, cmd.width, cmd.height);
+          break;
+        }
+        case "bindVertexBuffers": {
+          if (renderPass) {
+            for (let i = 0; i < cmd.buffers.length; i++) {
+              const buf = cmd.buffers[i];
+              if (buf.memory) {
+                renderPass.setVertexBuffer(
+                  cmd.firstBinding + i,
+                  buf.memory.gpuBuffer,
+                  buf.memoryOffset + (cmd.offsets[i] ?? 0),
+                );
+              }
+            }
+          }
+          break;
+        }
+        case "bindIndexBuffer": {
+          if (renderPass && cmd.buffer.memory) {
+            renderPass.setIndexBuffer(
+              cmd.buffer.memory.gpuBuffer,
+              cmd.indexType === VK_INDEX_TYPE.UINT16 ? "uint16" : "uint32",
+              cmd.buffer.memoryOffset + cmd.offset,
+            );
+          }
+          break;
+        }
+        case "draw": {
+          renderPass?.draw(cmd.vertexCount, cmd.instanceCount, cmd.firstVertex, cmd.firstInstance);
+          break;
+        }
+        case "drawIndexed": {
+          renderPass?.drawIndexed(
+            cmd.indexCount,
+            cmd.instanceCount,
+            cmd.firstIndex,
+            cmd.vertexOffset,
+            cmd.firstInstance,
+          );
+          break;
+        }
+        case "copyBufferToImage": {
+          endPass();
+          if (cmd.src.memory) {
+            encoder.copyBufferToTexture(
+              {
+                buffer: cmd.src.memory.gpuBuffer,
+                offset: cmd.src.memoryOffset + cmd.bufferOffset,
+                bytesPerRow: cmd.width * 4,
+                rowsPerImage: cmd.height,
+              },
+              { texture: cmd.dst.gpuTexture },
+              { width: cmd.width, height: cmd.height, depthOrArrayLayers: 1 },
+            );
+          }
+          break;
+        }
+        case "copyBuffer": {
+          endPass();
+          if (cmd.src.memory && cmd.dst.memory) {
+            encoder.copyBufferToBuffer(
+              cmd.src.memory.gpuBuffer,
+              cmd.src.memoryOffset + cmd.srcOffset,
+              cmd.dst.memory.gpuBuffer,
+              cmd.dst.memoryOffset + cmd.dstOffset,
+              cmd.size,
+            );
+            if (cmd.dst.memory.hostData) {
+              touchedHostMemories.add(cmd.dst.memory);
+            }
+          }
+          break;
+        }
+        case "fillBuffer": {
+          endPass();
+          if (cmd.dst.memory && cmd.size >= 4) {
+            const alignedSize = alignUp(cmd.size, 4);
+            const words = new Uint32Array(alignedSize >>> 2);
+            words.fill(cmd.data >>> 0);
+            const staging = this.device.createBuffer({
+              size: alignedSize,
+              usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            });
+            this.device.queue.writeBuffer(staging, 0, words);
+            encoder.copyBufferToBuffer(
+              staging,
+              0,
+              cmd.dst.memory.gpuBuffer,
+              cmd.dst.memoryOffset + cmd.dstOffset,
+              alignedSize,
+            );
+            stagingBuffers.push(staging);
+            if (cmd.dst.memory.hostData) {
+              touchedHostMemories.add(cmd.dst.memory);
+            }
+          }
+          break;
+        }
+      }
+    }
+    endPass();
+  }
+
+  private buildRenderPassDescriptor(
+    cmd: Extract<RecordedCommand, { type: "beginRenderPass" }>,
+  ): GPURenderPassDescriptor {
+    const colorView = cmd.framebuffer.attachments[0]?.gpuView;
+    const depthView = cmd.framebuffer.attachments[1]?.gpuView;
+    const rpInfo = cmd.renderPass.info;
+    const colorAttachments: GPURenderPassColorAttachment[] = colorView
+      ? [
+          {
+            view: colorView,
+            clearValue: {
+              r: cmd.clearColor[0],
+              g: cmd.clearColor[1],
+              b: cmd.clearColor[2],
+              a: cmd.clearColor[3],
+            },
+            loadOp: vkLoadOpToWebGpu(rpInfo.colorAttachment?.loadOp ?? 0),
+            storeOp: vkStoreOpToWebGpu(rpInfo.colorAttachment?.storeOp ?? 0),
+          },
+        ]
+      : [];
+    const depthStencilAttachment: GPURenderPassDepthStencilAttachment | undefined = depthView
+      ? {
+          view: depthView,
+          depthClearValue: cmd.clearDepth,
+          depthLoadOp: vkLoadOpToWebGpu(rpInfo.depthAttachment?.loadOp ?? 0),
+          depthStoreOp: vkStoreOpToWebGpu(rpInfo.depthAttachment?.storeOp ?? 0),
+        }
+      : undefined;
+    return { colorAttachments, depthStencilAttachment };
+  }
+
+  private bindDescriptorSets(
+    pass: GPUComputePassEncoder | GPURenderPassEncoder,
+    cmd: Extract<RecordedCommand, { type: "bindDescriptorSets" }>,
+    activePipeline: VenusPipeline | null,
+    touchedHostMemories: Set<VenusDeviceMemory>,
+  ): void {
+    let dynOffsetCursor = 0;
+    for (let i = 0; i < cmd.sets.length; i++) {
+      const set = cmd.sets[i];
+      const setIdx = cmd.firstSet + i;
+      const targetLayout = activePipeline?.reflectedBindGroupLayouts[setIdx] ?? set.layout.gpuLayout;
+      const bg = this.ensureBindGroup(set, targetLayout);
+      const dynCount = set.layout.bindings.filter((b) => isDynamicDescriptor(b.descriptorType)).length;
+      const slice = cmd.dynamicOffsets.slice(dynOffsetCursor, dynOffsetCursor + dynCount);
+      dynOffsetCursor += dynCount;
+      pass.setBindGroup(setIdx, bg, slice);
+      for (const [bindingIdx, b] of set.bindings.entries()) {
+        const layoutBinding = set.layout.bindings.find((lb) => lb.binding === bindingIdx);
+        const reflectedAccess = activePipeline?.storageAccess.get(`${setIdx}:${bindingIdx}`);
+        const isWritableStorage =
+          layoutBinding &&
+          isStorageDescriptor(layoutBinding.descriptorType) &&
+          (layoutBinding.stageFlags & VK_SHADER_STAGE.VERTEX) === 0 &&
+          reflectedAccess !== "read-only-storage";
+        if (isWritableStorage && b.buffer.memory?.hostData) {
+          touchedHostMemories.add(b.buffer.memory);
+        }
+      }
+    }
+  }
+
   async vkQueueWaitIdle(_queue: VkHandle): Promise<VkResult> {
     await this.pendingWork;
     return VK_RESULT.VK_SUCCESS;
@@ -975,8 +873,6 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   vkDestroyRingMESA(ringId: bigint): void {
     this.rings.delete(ringId);
   }
-
-  private replyStream: { resourceId: number; offset: number; size: number; position: number } | null = null;
 
   vkSetReplyCommandStreamMESA(resourceId: number, offset: bigint, size: bigint): void {
     this.replyStream = { resourceId, offset: Number(offset), size: Number(size), position: 0 };
@@ -996,15 +892,11 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
 
   vkCreateImage(_device: VkHandle, info: VkImageCreateInfo, image: VkHandle): VkResult {
     const format = vkFormatToWebGpu(info.format);
-    const texUsage =
-      typeof GPUTextureUsage !== "undefined"
-        ? GPUTextureUsage
-        : { COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04, STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10 };
-    let usage = texUsage.COPY_SRC | texUsage.COPY_DST;
-    if (info.usage & VK_IMAGE_USAGE.SAMPLED) usage |= texUsage.TEXTURE_BINDING;
-    if (info.usage & VK_IMAGE_USAGE.STORAGE) usage |= texUsage.STORAGE_BINDING;
+    let usage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
+    if (info.usage & VK_IMAGE_USAGE.SAMPLED) usage |= GPUTextureUsage.TEXTURE_BINDING;
+    if (info.usage & VK_IMAGE_USAGE.STORAGE) usage |= GPUTextureUsage.STORAGE_BINDING;
     if (info.usage & (VK_IMAGE_USAGE.COLOR_ATTACHMENT | VK_IMAGE_USAGE.DEPTH_STENCIL_ATTACHMENT)) {
-      usage |= texUsage.RENDER_ATTACHMENT;
+      usage |= GPUTextureUsage.RENDER_ATTACHMENT;
     }
     const gpuTexture = this.device.createTexture({
       size: { width: info.width, height: info.height, depthOrArrayLayers: 1 },
@@ -1311,34 +1203,9 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     storageAccess: Map<string, "read-only-storage" | "storage">,
   ): { bindGroupLayouts: GPUBindGroupLayout[]; pipelineLayout: GPUPipelineLayout } {
     const bindGroupLayouts = layout.setLayouts.map((setLayout, setIdx) => {
-      const entries: GPUBindGroupLayoutEntry[] = setLayout.bindings.map((b) => {
-        let visibility = 0;
-        if (b.stageFlags & 0x00000001) visibility |= GPUShaderStage.VERTEX;
-        if (b.stageFlags & 0x00000010) visibility |= GPUShaderStage.FRAGMENT;
-        if (b.stageFlags & 0x00000020) visibility |= GPUShaderStage.COMPUTE;
-        if (visibility === 0) {
-          visibility = GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
-        }
-        const isUniform =
-          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER ||
-          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC;
-        const hasDynamicOffset =
-          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
-          b.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC;
-        const reflected = storageAccess.get(`${setIdx}:${b.binding}`);
-        const storageType: GPUBufferBindingType =
-          (visibility & GPUShaderStage.VERTEX) !== 0 || reflected === "read-only-storage"
-            ? "read-only-storage"
-            : "storage";
-        return {
-          binding: b.binding,
-          visibility,
-          buffer: {
-            type: isUniform ? "uniform" : storageType,
-            hasDynamicOffset,
-          },
-        };
-      });
+      const entries = setLayout.bindings.map((b) =>
+        buildBindGroupLayoutEntry(b, storageAccess.get(`${setIdx}:${b.binding}`)),
+      );
       return this.device.createBindGroupLayout({ entries });
     });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts });
@@ -1349,12 +1216,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     set: VenusDescriptorSet,
     layout: GPUBindGroupLayout = set.layout.gpuLayout,
   ): GPUBindGroup {
-    if (set.dirty) {
-      set.gpuBindGroup = null;
-      set.gpuBindGroupsByLayout = new WeakMap();
-      set.dirty = false;
-    }
-    const cached = set.gpuBindGroupsByLayout?.get(layout);
+    const cached = set.gpuBindGroupsByLayout.get(layout);
     if (cached) return cached;
     const entries: GPUBindGroupEntry[] = [];
     for (const [binding, info] of set.bindings.entries()) {
@@ -1374,11 +1236,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       layout,
       entries,
     });
-    if (!set.gpuBindGroupsByLayout) {
-      set.gpuBindGroupsByLayout = new WeakMap();
-    }
     set.gpuBindGroupsByLayout.set(layout, bg);
-    set.gpuBindGroup = bg;
     return bg;
   }
 

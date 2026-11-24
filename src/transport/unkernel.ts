@@ -53,6 +53,8 @@ export const UNKERNEL_GPU_RESP = {
 } as const;
 
 const HDR_SIZE = 24;
+const CREATE_BLOB_SIZE = HDR_SIZE + 32;
+const MEM_ENTRY_SIZE = 16;
 
 function respHeader(type: number, size = HDR_SIZE): Uint8Array {
   const out = new Uint8Array(size);
@@ -62,10 +64,6 @@ function respHeader(type: number, size = HDR_SIZE): Uint8Array {
 
 interface BlobResource {
   id: number;
-  blobId: bigint;
-  size: bigint;
-  blobMem: number;
-  blobFlags: number;
   backing: VirtqBuffer[];
 }
 
@@ -78,7 +76,7 @@ interface ScanoutInfo {
 function parseMemEntries(dv: DataView, offset: number, nrEntries: number): VirtqBuffer[] {
   const entries: VirtqBuffer[] = [];
   for (let i = 0; i < nrEntries; i++) {
-    const base = offset + i * 16;
+    const base = offset + i * MEM_ENTRY_SIZE;
     const addr = Number(dv.getBigUint64(base, true));
     const len = dv.getUint32(base + 8, true);
     entries.push({ addr, len });
@@ -150,12 +148,12 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
     this.contexts.clear();
     this.blobs.clear();
     this.scanouts.clear();
-    this.backend.objects.clear();
+    this.backend.reset();
     this.inFlight = 0;
     this.tail = Promise.resolve();
   }
 
-  command(cmd: Uint8Array, _ctx: UnkernelGpuBackendContext): Uint8Array | null | Promise<Uint8Array | null> {
+  command(cmd: Uint8Array, ctx: UnkernelGpuBackendContext): Uint8Array | null | Promise<Uint8Array | null> {
     if (cmd.byteLength < HDR_SIZE) {
       return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
     }
@@ -165,6 +163,9 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
 
     switch (type) {
       case UNKERNEL_GPU_CMD.GET_CAPSET_INFO: {
+        if (cmd.byteLength < HDR_SIZE + 4) {
+          return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
+        }
         const index = dv.getUint32(HDR_SIZE, true);
         if (index !== 0) return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
         const out = respHeader(UNKERNEL_GPU_RESP.OK_CAPSET_INFO, HDR_SIZE + 16);
@@ -203,20 +204,16 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
       }
 
       case UNKERNEL_GPU_CMD.RESOURCE_CREATE_BLOB: {
-        if (cmd.byteLength < 56) {
+        if (cmd.byteLength < CREATE_BLOB_SIZE) {
           return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
         }
         const resourceId = dv.getUint32(HDR_SIZE, true);
-        const blobMem = dv.getUint32(HDR_SIZE + 4, true);
-        const blobFlags = dv.getUint32(HDR_SIZE + 8, true);
         const nrEntries = dv.getUint32(HDR_SIZE + 12, true);
-        if (cmd.byteLength < 56 + nrEntries * 16) {
+        if (cmd.byteLength < CREATE_BLOB_SIZE + nrEntries * MEM_ENTRY_SIZE) {
           return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
         }
-        const blobId = dv.getBigUint64(HDR_SIZE + 16, true);
-        const size = dv.getBigUint64(HDR_SIZE + 24, true);
-        const backing = parseMemEntries(dv, HDR_SIZE + 32, nrEntries);
-        this.blobs.set(resourceId, { id: resourceId, blobId, size, blobMem, blobFlags, backing });
+        const backing = parseMemEntries(dv, CREATE_BLOB_SIZE, nrEntries);
+        this.blobs.set(resourceId, { id: resourceId, backing });
         return respHeader(UNKERNEL_GPU_RESP.OK_NODATA);
       }
 
@@ -226,7 +223,7 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
         }
         const resourceId = dv.getUint32(HDR_SIZE, true);
         const nrEntries = dv.getUint32(HDR_SIZE + 4, true);
-        if (cmd.byteLength < HDR_SIZE + 8 + nrEntries * 16) {
+        if (cmd.byteLength < HDR_SIZE + 8 + nrEntries * MEM_ENTRY_SIZE) {
           return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
         }
         const blob = this.blobs.get(resourceId);
@@ -236,6 +233,9 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
       }
 
       case UNKERNEL_GPU_CMD.RESOURCE_DETACH_BACKING: {
+        if (cmd.byteLength < HDR_SIZE + 4) {
+          return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
+        }
         const resourceId = dv.getUint32(HDR_SIZE, true);
         const blob = this.blobs.get(resourceId);
         if (blob) blob.backing = [];
@@ -263,6 +263,9 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
       }
 
       case UNKERNEL_GPU_CMD.RESOURCE_UNREF: {
+        if (cmd.byteLength < HDR_SIZE + 4) {
+          return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
+        }
         const resourceId = dv.getUint32(HDR_SIZE, true);
         this.blobs.delete(resourceId);
         for (const [sid, s] of this.scanouts.entries()) {
@@ -281,6 +284,9 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
           return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
         }
         const size = dv.getUint32(HDR_SIZE, true);
+        if (cmd.byteLength < HDR_SIZE + 4 + size) {
+          return respHeader(UNKERNEL_GPU_RESP.ERR_INVALID_PARAMETER);
+        }
         const stream = cmd.slice(HDR_SIZE + 4, HDR_SIZE + 4 + size);
         this.inFlight++;
         const run = this.tail.then(async () => {
@@ -289,12 +295,18 @@ export class UnkernelVenusBackend implements UnkernelGpuBackend {
             if (reply.byteLength > 0) {
               const replyStream = this.backend.getReplyStream();
               if (replyStream) {
-                const blob = this.blobs.get(Number(replyStream.resourceId));
+                const blob = this.blobs.get(replyStream.resourceId);
                 const backing = blob?.backing.length
                   ? blob.backing
-                  : _ctx.backing(Number(replyStream.resourceId));
+                  : ctx.backing(replyStream.resourceId);
                 if (backing && backing.length > 0) {
-                  writeReplyToGuestMemory(_ctx.memory(), backing, replyStream.offset, reply);
+                  const maxBytes = Math.max(0, replyStream.size - replyStream.position);
+                  writeReplyToGuestMemory(
+                    ctx.memory(),
+                    backing,
+                    replyStream.offset + replyStream.position,
+                    reply.subarray(0, maxBytes),
+                  );
                 }
               }
             }

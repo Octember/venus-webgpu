@@ -1,18 +1,12 @@
 {
+  "extends": "./tsconfig.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": true,
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
+    "noEmit": false,
     "declaration": true,
+    "emitDeclarationOnly": true,
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["@webgpu/types"]
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "demo", "tests"]

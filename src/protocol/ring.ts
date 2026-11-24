@@ -89,28 +89,38 @@ export class VenusRing {
 
   /** Guest-side helper: write a command stream chunk into the ring and advance tail. */
   write(data: Uint8Array): void {
-    if (data.byteLength > this.freeSpace) {
-      throw new Error(`VenusRing overflow: need ${data.byteLength}, free ${this.freeSpace}`);
+    const head = this.head;
+    const tail = this.tail;
+    const avail = (tail - head) >>> 0;
+    if (avail > this.cfg.bufferSize) {
+      throw new Error(`VenusRing corrupted: available ${avail} > bufferSize ${this.cfg.bufferSize}`);
+    }
+    const free = this.cfg.bufferSize - avail;
+    if (data.byteLength > free) {
+      throw new Error(`VenusRing overflow: need ${data.byteLength}, free ${free}`);
     }
     const mask = this.cfg.bufferSize - 1;
-    let t = this.tail;
-    const start = t & mask;
+    const start = tail & mask;
     const first = Math.min(data.byteLength, this.cfg.bufferSize - start);
     this.bytes.set(data.subarray(0, first), this.cfg.bufferOffset + start);
     if (first < data.byteLength) {
       this.bytes.set(data.subarray(first), this.cfg.bufferOffset);
     }
-    t = (t + data.byteLength) >>> 0;
-    this.tail = t;
+    this.tail = (tail + data.byteLength) >>> 0;
   }
 
   /** Host-side: peek all currently available bytes from head..tail without advancing head. */
   peekAvailable(): Uint8Array {
-    const len = this.available;
+    const head = this.head;
+    const tail = this.tail;
+    const len = (tail - head) >>> 0;
+    if (len > this.cfg.bufferSize) {
+      throw new Error(`VenusRing corrupted: available ${len} > bufferSize ${this.cfg.bufferSize}`);
+    }
     if (len === 0) return new Uint8Array(0);
     const out = new Uint8Array(len);
     const mask = this.cfg.bufferSize - 1;
-    const start = this.head & mask;
+    const start = head & mask;
     const first = Math.min(len, this.cfg.bufferSize - start);
     out.set(this.bytes.subarray(this.cfg.bufferOffset + start, this.cfg.bufferOffset + start + first), 0);
     if (first < len) {

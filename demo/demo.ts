@@ -44,18 +44,33 @@ window.venusDemo = {
   lastError: null,
 };
 
+async function requestWebGpuDevice(): Promise<GPUDevice> {
+  if (!navigator.gpu) {
+    throw new Error("WebGPU is not supported in this browser.");
+  }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error("No WebGPU adapter found.");
+  const device = await adapter.requestDevice();
+  device.addEventListener("uncapturederror", (e) =>
+    console.error("[WebGPU uncapturederror]", e.error?.message ?? e),
+  );
+  return device;
+}
+
+function showError(err: unknown): void {
+  const message = (err as Error).message ?? String(err);
+  const badge = document.createElement("span");
+  badge.className = "err";
+  badge.textContent = "ERROR";
+  out.replaceChildren(badge, document.createTextNode(`: ${message}`));
+  window.venusDemo.lastError = message;
+  window.venusDemo.status = "error";
+}
+
 btn.addEventListener("click", async () => {
   out.textContent = "Initializing WebGPU & naga-wasm...";
   try {
-    if (!navigator.gpu) {
-      throw new Error("WebGPU is not supported in this browser.");
-    }
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error("No WebGPU adapter found.");
-    const device = await adapter.requestDevice();
-    device.addEventListener("uncapturederror", (e) =>
-      console.error("[WebGPU uncapturederror]", e.error?.message ?? e),
-    );
+    const device = await requestWebGpuDevice();
 
     const translator = new SpirvTranslator();
     const spirv = createVectorAddSpirv();
@@ -198,12 +213,7 @@ btn.addEventListener("click", async () => {
     window.venusDemo.computePassed = mismatches === 0;
     window.venusDemo.status = mismatches === 0 ? "compute-pass" : "compute-fail";
   } catch (err) {
-    const badge = document.createElement("span");
-    badge.className = "err";
-    badge.textContent = "ERROR";
-    out.replaceChildren(badge, document.createTextNode(`: ${(err as Error).message}`));
-    window.venusDemo.lastError = (err as Error).message;
-    window.venusDemo.status = "error";
+    showError(err);
   }
 });
 
@@ -249,19 +259,18 @@ function buildMvpMatrix(angle: number, aspect: number): Float32Array {
 }
 
 let cubeAnimId = 0;
+let cubeRunId = 0;
 
 cubeBtn.addEventListener("click", async () => {
-  if (cubeAnimId) cancelAnimationFrame(cubeAnimId);
+  if (cubeAnimId) {
+    cancelAnimationFrame(cubeAnimId);
+    cubeAnimId = 0;
+  }
+  const runId = ++cubeRunId;
   out.textContent = "Initializing 3D Cube via Venus -> naga-wasm -> WebGPU...";
   window.venusDemo.status = "cube-init";
   try {
-    if (!navigator.gpu) throw new Error("WebGPU is not supported in this browser.");
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error("No WebGPU adapter found.");
-    const device = await adapter.requestDevice();
-    device.addEventListener("uncapturederror", (e) =>
-      console.error("[WebGPU uncapturederror]", e.error?.message ?? e),
-    );
+    const device = await requestWebGpuDevice();
     const ctx = canvas.getContext("webgpu");
     if (!ctx) throw new Error("Could not get WebGPU canvas context.");
 
@@ -314,20 +323,16 @@ cubeBtn.addEventListener("click", async () => {
     enc.vkCreateDevice(0x1000n, DEV, 0);
     enc.vkGetDeviceQueue(DEV, 0, 0, QUEUE);
 
-    enc.vkCreateBuffer(DEV, BigInt(vertices.byteLength), VK_BUFFER_USAGE.VERTEX_BUFFER, BUF_V);
-    enc.vkAllocateMemory(DEV, BigInt(vertices.byteLength), 1, MEM_V);
-    enc.vkBindBufferMemory(DEV, BUF_V, MEM_V, 0n);
-    enc.vkMapMemory(DEV, MEM_V, 0n, BigInt(vertices.byteLength));
-
-    enc.vkCreateBuffer(DEV, BigInt(indices.byteLength), VK_BUFFER_USAGE.INDEX_BUFFER, BUF_I);
-    enc.vkAllocateMemory(DEV, BigInt(indices.byteLength), 1, MEM_I);
-    enc.vkBindBufferMemory(DEV, BUF_I, MEM_I, 0n);
-    enc.vkMapMemory(DEV, MEM_I, 0n, BigInt(indices.byteLength));
-
-    enc.vkCreateBuffer(DEV, 64n, VK_BUFFER_USAGE.UNIFORM_BUFFER, BUF_U);
-    enc.vkAllocateMemory(DEV, 64n, 1, MEM_U);
-    enc.vkBindBufferMemory(DEV, BUF_U, MEM_U, 0n);
-    enc.vkMapMemory(DEV, MEM_U, 0n, 64n);
+    for (const [buf, mem, size, usage] of [
+      [BUF_V, MEM_V, BigInt(vertices.byteLength), VK_BUFFER_USAGE.VERTEX_BUFFER],
+      [BUF_I, MEM_I, BigInt(indices.byteLength), VK_BUFFER_USAGE.INDEX_BUFFER],
+      [BUF_U, MEM_U, 64n, VK_BUFFER_USAGE.UNIFORM_BUFFER],
+    ] as const) {
+      enc.vkCreateBuffer(DEV, size, usage, buf);
+      enc.vkAllocateMemory(DEV, size, 1, mem);
+      enc.vkBindBufferMemory(DEV, buf, mem, 0n);
+      enc.vkMapMemory(DEV, mem, 0n, size);
+    }
 
     enc.vkCreateShaderModule(DEV, vsSpirv, VS);
     enc.vkCreateShaderModule(DEV, fsSpirv, FS);
@@ -411,8 +416,8 @@ cubeBtn.addEventListener("click", async () => {
     ring.write(enc.finish());
     await decoder.execute(ring.consumeAvailable());
 
-    new Uint8Array(backend.getMemoryHostData(MEM_V)!.buffer).set(new Uint8Array(vertices.buffer));
-    new Uint8Array(backend.getMemoryHostData(MEM_I)!.buffer).set(new Uint8Array(indices.buffer));
+    backend.getMemoryHostData(MEM_V)!.set(new Uint8Array(vertices.buffer));
+    backend.getMemoryHostData(MEM_I)!.set(new Uint8Array(indices.buffer));
     const uboBytes = backend.getMemoryHostData(MEM_U)!;
 
     const flushStatic = new VenusCommandEncoder();
@@ -423,10 +428,13 @@ cubeBtn.addEventListener("click", async () => {
     ring.write(flushStatic.finish());
     await decoder.execute(ring.consumeAvailable());
 
+    if (runId !== cubeRunId) return;
+
     window.venusDemo.status = "cube-running";
     out.textContent = "3D Cube running via Venus -> naga-wasm -> WebGPU!";
 
     const renderFrame = async (timeMs: number) => {
+      if (runId !== cubeRunId) return;
       const mvp = buildMvpMatrix(timeMs * 0.001, canvas.width / canvas.height);
       uboBytes.set(new Uint8Array(mvp.buffer));
       const frameEnc = new VenusCommandEncoder();
@@ -435,16 +443,12 @@ cubeBtn.addEventListener("click", async () => {
       frameEnc.vkQueuePresentKHR(QUEUE, IMG_C);
       ring.write(frameEnc.finish());
       await decoder.execute(ring.consumeAvailable());
+      if (runId !== cubeRunId) return;
       window.venusDemo.frames++;
       cubeAnimId = requestAnimationFrame((t) => void renderFrame(t));
     };
     cubeAnimId = requestAnimationFrame((t) => void renderFrame(t));
   } catch (err) {
-    const badge = document.createElement("span");
-    badge.className = "err";
-    badge.textContent = "ERROR";
-    out.replaceChildren(badge, document.createTextNode(`: ${(err as Error).message}`));
-    window.venusDemo.lastError = (err as Error).message;
-    window.venusDemo.status = "error";
+    showError(err);
   }
 });

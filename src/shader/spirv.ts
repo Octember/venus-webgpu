@@ -26,7 +26,12 @@ export class SpirvTranslator {
 
   async ensureInit(wasmInput?: InitInput): Promise<void> {
     if (!this.initPromise) {
-      this.initPromise = init(wasmInput).then(() => undefined);
+      this.initPromise = init(wasmInput)
+        .then(() => undefined)
+        .catch((err) => {
+          this.initPromise = null;
+          throw err;
+        });
     }
     return this.initPromise;
   }
@@ -60,24 +65,16 @@ export class SpirvTranslator {
   }
 }
 
-/**
- * Generates a valid SPIR-V 1.3 compute shader:
- *   @group(0) @binding(0) var<storage, read> a: array<f32>;
- *   @group(0) @binding(1) var<storage, read> b: array<f32>;
- *   @group(0) @binding(2) var<storage, read_write> c: array<f32>;
- *   @compute @workgroup_size(64, 1, 1)
- *   fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
- *     c[gid.x] = a[gid.x] + b[gid.x];
- *   }
- */
-export function createVectorAddSpirv(): Uint32Array {
-  const words: number[] = [];
+const textEncoder = new TextEncoder();
+
+function createSpirvBuilder(bound: number, generator = 0) {
+  const words: number[] = [0x07230203, 0x00010300, generator, bound, 0];
   const emit = (opcode: number, ...operands: number[]) => {
     words.push(((operands.length + 1) << 16) | opcode);
     for (const op of operands) words.push(op >>> 0);
   };
   const strWords = (s: string): number[] => {
-    const bytes = new TextEncoder().encode(s + "\0");
+    const bytes = textEncoder.encode(s + "\0");
     const paddedLen = (bytes.length + 3) & ~3;
     const out: number[] = [];
     for (let i = 0; i < paddedLen; i += 4) {
@@ -91,6 +88,21 @@ export function createVectorAddSpirv(): Uint32Array {
     }
     return out;
   };
+  return { words, emit, strWords, finish: () => new Uint32Array(words) };
+}
+
+/**
+ * Generates a valid SPIR-V 1.3 compute shader:
+ *   @group(0) @binding(0) var<storage, read> a: array<f32>;
+ *   @group(0) @binding(1) var<storage, read> b: array<f32>;
+ *   @group(0) @binding(2) var<storage, read_write> c: array<f32>;
+ *   @compute @workgroup_size(64, 1, 1)
+ *   fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+ *     c[gid.x] = a[gid.x] + b[gid.x];
+ *   }
+ */
+export function createVectorAddSpirv(): Uint32Array {
+  const { words, emit, strWords } = createSpirvBuilder(27, 0);
 
   // IDs
   const ID_MAIN = 1;
@@ -122,7 +134,6 @@ export function createVectorAddSpirv(): Uint32Array {
   const BOUND = 27;
 
   // SPIR-V Header: Magic, Version 1.3, Generator, Bound, Schema
-  words.push(0x07230203, 0x00010300, 0x00000000, BOUND, 0x00000000);
 
   // OpCapability Shader (17, 1)
   emit(17, 1);
@@ -199,23 +210,7 @@ export function createVectorAddSpirv(): Uint32Array {
  *   layout(location = 0) out vec3 outColor;
  */
 export function createCubeVertexSpirv(): Uint32Array {
-  const words: number[] = [];
-  const op = (opcode: number, ...args: number[]) => {
-    words.push(((args.length + 1) << 16) | opcode, ...args);
-  };
-  const str = (s: string): number[] => {
-    const out: number[] = [];
-    const bytes = new TextEncoder().encode(s + "\0");
-    for (let i = 0; i < bytes.length; i += 4) {
-      out.push(
-        (bytes[i] ?? 0) |
-          ((bytes[i + 1] ?? 0) << 8) |
-          ((bytes[i + 2] ?? 0) << 16) |
-          ((bytes[i + 3] ?? 0) << 24),
-      );
-    }
-    return out;
-  };
+  const { emit: op, strWords: str, finish } = createSpirvBuilder(29, 0x00080001);
 
   // IDs:
   // 1: void, 2: fn(), 3: f32, 4: vec3<f32>, 5: vec4<f32>, 6: mat4x4<f32>
@@ -224,7 +219,6 @@ export function createCubeVertexSpirv(): Uint32Array {
   // 13: ptr Output vec4, 14: gl_Position, 15: ptr Output vec3, 16: outColor
   // 17: main, 18: label, 19: ptr Uniform mat4, 20: i32(0), 21: mvp, 22: pos3, 23: f32(1.0)
   // 24: pos4, 25: clipPos, 26: col3, 27: i32_t
-  words.push(0x07230203, 0x00010300, 0x00080001, 28, 0);
 
   op(17, 1); // OpCapability Shader
   op(14, 0, 1); // OpMemoryModel Logical GLSL450
@@ -282,8 +276,7 @@ export function createCubeVertexSpirv(): Uint32Array {
   op(253); // OpReturn
   op(56); // OpFunctionEnd
 
-  words[3] = 29; // bound
-  return new Uint32Array(words);
+  return finish();
 }
 
 /**
@@ -292,29 +285,12 @@ export function createCubeVertexSpirv(): Uint32Array {
  *   layout(location = 0) out vec4 outColor;
  */
 export function createCubeFragmentSpirv(): Uint32Array {
-  const words: number[] = [];
-  const op = (opcode: number, ...args: number[]) => {
-    words.push(((args.length + 1) << 16) | opcode, ...args);
-  };
-  const str = (s: string): number[] => {
-    const out: number[] = [];
-    const bytes = new TextEncoder().encode(s + "\0");
-    for (let i = 0; i < bytes.length; i += 4) {
-      out.push(
-        (bytes[i] ?? 0) |
-          ((bytes[i + 1] ?? 0) << 8) |
-          ((bytes[i + 2] ?? 0) << 16) |
-          ((bytes[i + 3] ?? 0) << 24),
-      );
-    }
-    return out;
-  };
+  const { emit: op, strWords: str, finish } = createSpirvBuilder(15, 0x00080001);
 
   // IDs:
   // 1: void, 2: fn(), 3: f32, 4: vec3<f32>, 5: vec4<f32>
   // 6: ptr Input vec3, 7: inColor, 8: ptr Output vec4, 9: outColor
   // 10: main, 11: label, 12: col3, 13: f32(1.0), 14: col4
-  words.push(0x07230203, 0x00010300, 0x00080001, 15, 0);
 
   op(17, 1); // OpCapability Shader
   op(14, 0, 1); // OpMemoryModel Logical GLSL450
@@ -344,5 +320,5 @@ export function createCubeFragmentSpirv(): Uint32Array {
   op(253); // OpReturn
   op(56); // OpFunctionEnd
 
-  return new Uint32Array(words);
+  return finish();
 }

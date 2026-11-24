@@ -45,6 +45,50 @@ export class VenusCommandDecoder {
     reply.writeU32(commandFlags);
   }
 
+  private replyResult(
+    reply: VenusCsEncoder,
+    commandType: number,
+    commandFlags: number,
+    wantsReply: boolean,
+    result: number,
+  ): void {
+    if (wantsReply) {
+      this.writeReplyHeader(reply, commandType, commandFlags);
+      reply.writeI32(result);
+    }
+  }
+
+  private replyVoid(
+    reply: VenusCsEncoder,
+    commandType: number,
+    commandFlags: number,
+    wantsReply: boolean,
+  ): void {
+    if (wantsReply) {
+      this.writeReplyHeader(reply, commandType, commandFlags);
+    }
+  }
+
+  private readHandles(dec: VenusCsDecoder): VkHandle[] {
+    const count = dec.readU32();
+    const handles: VkHandle[] = [];
+    for (let i = 0; i < count; i++) handles.push(dec.readHandle());
+    return handles;
+  }
+
+  private readMappedMemoryRanges(dec: VenusCsDecoder): VkMappedMemoryRange[] {
+    const count = dec.readU32();
+    const ranges: VkMappedMemoryRange[] = [];
+    for (let i = 0; i < count; i++) {
+      ranges.push({
+        memory: dec.readHandle(),
+        offset: dec.readU64(),
+        size: dec.readU64(),
+      });
+    }
+    return ranges;
+  }
+
   private async dispatch(
     type: number,
     flags: number,
@@ -794,6 +838,7 @@ export class VenusCommandDecoder {
         const device = dec.readHandle();
         const image = dec.readHandle();
         this.handler.vkDestroyImage?.(device, image);
+        this.replyVoid(reply, type, flags, wantsReply);
         break;
       }
 
@@ -845,6 +890,7 @@ export class VenusCommandDecoder {
         const device = dec.readHandle();
         const view = dec.readHandle();
         this.handler.vkDestroyImageView?.(device, view);
+        this.replyVoid(reply, type, flags, wantsReply);
         break;
       }
 
@@ -865,6 +911,7 @@ export class VenusCommandDecoder {
         const device = dec.readHandle();
         const sampler = dec.readHandle();
         this.handler.vkDestroySampler?.(device, sampler);
+        this.replyVoid(reply, type, flags, wantsReply);
         break;
       }
 
@@ -892,6 +939,7 @@ export class VenusCommandDecoder {
         const device = dec.readHandle();
         const renderPass = dec.readHandle();
         this.handler.vkDestroyRenderPass?.(device, renderPass);
+        this.replyVoid(reply, type, flags, wantsReply);
         break;
       }
 
@@ -917,6 +965,7 @@ export class VenusCommandDecoder {
         const device = dec.readHandle();
         const framebuffer = dec.readHandle();
         this.handler.vkDestroyFramebuffer?.(device, framebuffer);
+        this.replyVoid(reply, type, flags, wantsReply);
         break;
       }
 

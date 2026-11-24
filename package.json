@@ -22,7 +22,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/index.ts --outdir dist --target browser --external naga-wasm && bun build src/transport/unkernel.ts --outdir dist/transport --target browser --external naga-wasm && bun build demo/demo.ts --outdir demo/dist --target browser && cp node_modules/naga-wasm/dist/wasm/naga_bg.wasm demo/dist/naga_bg.wasm && cp node_modules/naga-wasm/dist/wasm/naga_bg.wasm dist/naga_bg.wasm && tsc -p tsconfig.build.json --emitDeclarationOnly && find dist -name '*.d.ts' -exec sed -i.bak 's/\\.ts\";/.js\";/g' {} + && find dist -name '*.d.ts.bak' -delete",
+    "build": "bun build src/index.ts --outdir dist --target browser --external naga-wasm && bun build src/transport/unkernel.ts --outdir dist/transport --target browser --external naga-wasm && bun build demo/demo.ts --outdir demo/dist --target browser && cp node_modules/naga-wasm/dist/wasm/naga_bg.wasm demo/dist/naga_bg.wasm && cp node_modules/naga-wasm/dist/wasm/naga_bg.wasm dist/naga_bg.wasm && tsc -p tsconfig.build.json && find dist -name '*.d.ts' -exec sed -i.bak 's/\\.ts\";/.js\";/g' {} + && find dist -name '*.d.ts.bak' -delete",
     "demo": "bun run demo/serve.ts"
   },
   "dependencies": {
