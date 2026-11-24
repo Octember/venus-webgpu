@@ -16,11 +16,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/noahbuiltit/venus-webgpu.git"
+    "url": "git+https://github.com/Octember/venus-webgpu.git"
   },
-  "homepage": "https://github.com/noahbuiltit/venus-webgpu#readme",
+  "homepage": "https://github.com/Octember/venus-webgpu#readme",
   "bugs": {
-    "url": "https://github.com/noahbuiltit/venus-webgpu/issues"
+    "url": "https://github.com/Octember/venus-webgpu/issues"
   },
   "exports": {
     ".": {
