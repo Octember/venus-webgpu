@@ -1,6 +1,6 @@
 {
   "name": "venus-webgpu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Venus (virtio-gpu Vulkan) to WebGPU bridge for browser Linux",
   "type": "module",
   "license": "MIT",
