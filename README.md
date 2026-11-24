@@ -51,11 +51,13 @@ bun run demo      # Serve browser demo at http://localhost:4173
 ## `unkernel` Integration
 
 ```ts
+import { createKernel } from "unkernel";
 import { UnkernelVenusBackend } from "venus-webgpu/unkernel";
 
 const adapter = await navigator.gpu.requestAdapter();
 const device = await adapter!.requestDevice();
-const backend = new UnkernelVenusBackend(device);
+const gpuBackend = new UnkernelVenusBackend(device);
 
-// Pass `backend` as `VirtioGpuOptions.backend` in unkernel
+// Note: `worker: false` is required so the inline WebGPU backend runs on the main/UI thread.
+const kernel = await createKernel({ gpu: true, gpuBackend, worker: false });
 ```

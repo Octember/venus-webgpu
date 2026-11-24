@@ -71,6 +71,31 @@ export const VK_COMMAND_TYPE = {
   vkNotifyRingMESA: 190,
   vkWriteRingExtraMESA: 191,
   vkGetMemoryResourcePropertiesMESA: 192,
+
+  // Phase 2: Graphics & Presentation
+  vkCreateImage: 400,
+  vkDestroyImage: 401,
+  vkGetImageMemoryRequirements: 402,
+  vkBindImageMemory: 403,
+  vkCreateImageView: 404,
+  vkDestroyImageView: 405,
+  vkCreateSampler: 406,
+  vkDestroySampler: 407,
+  vkCreateRenderPass: 408,
+  vkDestroyRenderPass: 409,
+  vkCreateFramebuffer: 410,
+  vkDestroyFramebuffer: 411,
+  vkCreateGraphicsPipelines: 412,
+  vkCmdBeginRenderPass: 413,
+  vkCmdEndRenderPass: 414,
+  vkCmdSetViewport: 415,
+  vkCmdSetScissor: 416,
+  vkCmdBindVertexBuffers: 417,
+  vkCmdBindIndexBuffer: 418,
+  vkCmdDraw: 419,
+  vkCmdDrawIndexed: 420,
+  vkCmdCopyBufferToImage: 421,
+  vkQueuePresentKHR: 422,
 } as const;
 
 export type VkCommandType = (typeof VK_COMMAND_TYPE)[keyof typeof VK_COMMAND_TYPE];
@@ -96,6 +121,8 @@ export const VK_BUFFER_USAGE = {
   TRANSFER_DST: 0x00000002,
   UNIFORM_BUFFER: 0x00000010,
   STORAGE_BUFFER: 0x00000020,
+  INDEX_BUFFER: 0x00000040,
+  VERTEX_BUFFER: 0x00000080,
 } as const;
 
 export const VK_MEMORY_PROPERTY = {
@@ -106,6 +133,10 @@ export const VK_MEMORY_PROPERTY = {
 } as const;
 
 export const VK_DESCRIPTOR_TYPE = {
+  SAMPLER: 0,
+  COMBINED_IMAGE_SAMPLER: 1,
+  SAMPLED_IMAGE: 2,
+  STORAGE_IMAGE: 3,
   UNIFORM_BUFFER: 6,
   STORAGE_BUFFER: 7,
   UNIFORM_BUFFER_DYNAMIC: 8,
@@ -118,7 +149,72 @@ export const VK_PIPELINE_BIND_POINT = {
 } as const;
 
 export const VK_SHADER_STAGE = {
+  VERTEX: 0x00000001,
+  FRAGMENT: 0x00000010,
   COMPUTE: 0x00000020,
+  ALL_GRAPHICS: 0x0000001f,
+  ALL: 0x7fffffff,
+} as const;
+
+export const VK_FORMAT = {
+  R8G8B8A8_UNORM: 37,
+  B8G8R8A8_UNORM: 44,
+  R32G32_SFLOAT: 103,
+  R32G32B32_SFLOAT: 106,
+  R32G32B32A32_SFLOAT: 109,
+  D32_SFLOAT: 126,
+  D24_UNORM_S8_UINT: 129,
+} as const;
+
+export const VK_IMAGE_USAGE = {
+  TRANSFER_SRC: 0x00000001,
+  TRANSFER_DST: 0x00000002,
+  SAMPLED: 0x00000004,
+  STORAGE: 0x00000008,
+  COLOR_ATTACHMENT: 0x00000010,
+  DEPTH_STENCIL_ATTACHMENT: 0x00000020,
+} as const;
+
+export const VK_ATTACHMENT_LOAD_OP = {
+  LOAD: 0,
+  CLEAR: 1,
+  DONT_CARE: 2,
+} as const;
+
+export const VK_ATTACHMENT_STORE_OP = {
+  STORE: 0,
+  DONT_CARE: 1,
+} as const;
+
+export const VK_PRIMITIVE_TOPOLOGY = {
+  POINT_LIST: 0,
+  LINE_LIST: 1,
+  LINE_STRIP: 2,
+  TRIANGLE_LIST: 3,
+  TRIANGLE_STRIP: 4,
+} as const;
+
+export const VK_CULL_MODE = {
+  NONE: 0,
+  FRONT: 1,
+  BACK: 2,
+  FRONT_AND_BACK: 3,
+} as const;
+
+export const VK_COMPARE_OP = {
+  NEVER: 0,
+  LESS: 1,
+  EQUAL: 2,
+  LESS_OR_EQUAL: 3,
+  GREATER: 4,
+  NOT_EQUAL: 5,
+  GREATER_OR_EQUAL: 6,
+  ALWAYS: 7,
+} as const;
+
+export const VK_INDEX_TYPE = {
+  UINT16: 0,
+  UINT32: 1,
 } as const;
 
 export const VK_QUEUE_FLAGS = {

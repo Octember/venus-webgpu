@@ -15,6 +15,7 @@ export interface VenusRingConfig {
 
 export class VenusRing {
   private readonly view: DataView;
+  private readonly atomicView: Int32Array | null;
   private readonly bytes: Uint8Array;
   private readonly cfg: VenusRingConfig;
 
@@ -24,36 +25,61 @@ export class VenusRing {
     }
     this.bytes = shmem;
     this.view = new DataView(shmem.buffer, shmem.byteOffset, shmem.byteLength);
+    this.atomicView =
+      typeof SharedArrayBuffer !== "undefined" &&
+      shmem.buffer instanceof SharedArrayBuffer &&
+      (shmem.byteOffset & 3) === 0
+        ? new Int32Array(shmem.buffer, shmem.byteOffset, shmem.byteLength >> 2)
+        : null;
     this.cfg = cfg;
   }
 
+  private loadU32(byteOffset: number): number {
+    if (this.atomicView && (byteOffset & 3) === 0) {
+      return Atomics.load(this.atomicView, byteOffset >> 2) >>> 0;
+    }
+    return this.view.getUint32(byteOffset, true);
+  }
+
+  private storeU32(byteOffset: number, val: number): void {
+    if (this.atomicView && (byteOffset & 3) === 0) {
+      Atomics.store(this.atomicView, byteOffset >> 2, val | 0);
+      return;
+    }
+    this.view.setUint32(byteOffset, val >>> 0, true);
+  }
+
   get head(): number {
-    return this.view.getUint32(this.cfg.headOffset, true);
+    return this.loadU32(this.cfg.headOffset);
   }
 
   set head(val: number) {
-    this.view.setUint32(this.cfg.headOffset, val >>> 0, true);
+    this.storeU32(this.cfg.headOffset, val);
   }
 
   get tail(): number {
-    return this.view.getUint32(this.cfg.tailOffset, true);
+    return this.loadU32(this.cfg.tailOffset);
   }
 
   set tail(val: number) {
-    this.view.setUint32(this.cfg.tailOffset, val >>> 0, true);
+    this.storeU32(this.cfg.tailOffset, val);
   }
 
   get status(): number {
-    return this.view.getUint32(this.cfg.statusOffset, true);
+    return this.loadU32(this.cfg.statusOffset);
   }
 
   set status(val: number) {
-    this.view.setUint32(this.cfg.statusOffset, val >>> 0, true);
+    this.storeU32(this.cfg.statusOffset, val);
   }
 
   /** Number of unread bytes available in the ring. */
   get available(): number {
-    return (this.tail - this.head) >>> 0;
+    const avail = (this.tail - this.head) >>> 0;
+    if (avail > this.cfg.bufferSize) {
+      throw new Error(`VenusRing corrupted: available ${avail} > bufferSize ${this.cfg.bufferSize}`);
+    }
+    return avail;
   }
 
   /** Number of free bytes available for writing. */
@@ -78,8 +104,8 @@ export class VenusRing {
     this.tail = t;
   }
 
-  /** Host-side: read all currently available bytes from head..tail and advance head. */
-  consumeAvailable(): Uint8Array {
+  /** Host-side: peek all currently available bytes from head..tail without advancing head. */
+  peekAvailable(): Uint8Array {
     const len = this.available;
     if (len === 0) return new Uint8Array(0);
     const out = new Uint8Array(len);
@@ -90,7 +116,20 @@ export class VenusRing {
     if (first < len) {
       out.set(this.bytes.subarray(this.cfg.bufferOffset, this.cfg.bufferOffset + (len - first)), first);
     }
-    this.head = (this.head + len) >>> 0;
+    return out;
+  }
+
+  /** Host-side: advance head after execution completes. */
+  advanceHead(bytes: number): void {
+    this.head = (this.head + bytes) >>> 0;
+  }
+
+  /** Host-side: read all currently available bytes from head..tail and advance head. */
+  consumeAvailable(): Uint8Array {
+    const out = this.peekAvailable();
+    if (out.byteLength > 0) {
+      this.advanceHead(out.byteLength);
+    }
     return out;
   }
 }

@@ -1,8 +1,14 @@
 import { VK_COMMAND_GENERATE_REPLY_BIT_EXT, VK_COMMAND_TYPE } from "./constants.ts";
 import type {
   VkDescriptorSetLayoutBinding,
+  VkFramebufferCreateInfo,
+  VkGraphicsPipelineCreateInfo,
   VkHandle,
+  VkImageCreateInfo,
+  VkImageViewCreateInfo,
   VkMappedMemoryRange,
+  VkRenderPassCreateInfo,
+  VkSamplerCreateInfo,
   VkSubmitInfo,
   VkWriteDescriptorSet,
 } from "./types.ts";
@@ -357,6 +363,286 @@ export class VenusCommandEncoder {
   vkQueueWaitIdle(queue: VkHandle, reply = true): void {
     this.header(VK_COMMAND_TYPE.vkQueueWaitIdle, reply);
     this.cs.writeHandle(queue);
+  }
+
+  vkSetReplyCommandStreamMESA(resourceId: number, offset: bigint, size: bigint): void {
+    this.header(VK_COMMAND_TYPE.vkSetReplyCommandStreamMESA);
+    this.cs.writeU32(resourceId);
+    this.cs.writeU64(offset);
+    this.cs.writeU64(size);
+  }
+
+  vkSeekReplyCommandStreamMESA(position: bigint): void {
+    this.header(VK_COMMAND_TYPE.vkSeekReplyCommandStreamMESA);
+    this.cs.writeU64(position);
+  }
+
+  // Phase 2: Graphics & Presentation
+
+  vkCreateImage(device: VkHandle, info: VkImageCreateInfo, image: VkHandle, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkCreateImage, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeU32(info.format);
+    this.cs.writeU32(info.width);
+    this.cs.writeU32(info.height);
+    this.cs.writeU32(info.usage);
+    this.cs.writeHandle(image);
+  }
+
+  vkDestroyImage(device: VkHandle, image: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkDestroyImage);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(image);
+  }
+
+  vkGetImageMemoryRequirements(device: VkHandle, image: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkGetImageMemoryRequirements, true);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(image);
+  }
+
+  vkBindImageMemory(device: VkHandle, image: VkHandle, memory: VkHandle, offset: bigint, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkBindImageMemory, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(image);
+    this.cs.writeHandle(memory);
+    this.cs.writeU64(offset);
+  }
+
+  vkCreateImageView(device: VkHandle, info: VkImageViewCreateInfo, view: VkHandle, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkCreateImageView, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(info.image);
+    this.cs.writeU32(info.format);
+    this.cs.writeU32(info.aspectMask);
+    this.cs.writeHandle(view);
+  }
+
+  vkDestroyImageView(device: VkHandle, view: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkDestroyImageView);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(view);
+  }
+
+  vkCreateSampler(device: VkHandle, info: VkSamplerCreateInfo, sampler: VkHandle, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkCreateSampler, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeU32(info.magFilter);
+    this.cs.writeU32(info.minFilter);
+    this.cs.writeHandle(sampler);
+  }
+
+  vkDestroySampler(device: VkHandle, sampler: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkDestroySampler);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(sampler);
+  }
+
+  vkCreateRenderPass(device: VkHandle, info: VkRenderPassCreateInfo, renderPass: VkHandle, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkCreateRenderPass, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeU32(info.colorAttachment ? 1 : 0);
+    if (info.colorAttachment) {
+      this.cs.writeU32(info.colorAttachment.format);
+      this.cs.writeU32(info.colorAttachment.loadOp);
+      this.cs.writeU32(info.colorAttachment.storeOp);
+    }
+    this.cs.writeU32(info.depthAttachment ? 1 : 0);
+    if (info.depthAttachment) {
+      this.cs.writeU32(info.depthAttachment.format);
+      this.cs.writeU32(info.depthAttachment.loadOp);
+      this.cs.writeU32(info.depthAttachment.storeOp);
+    }
+    this.cs.writeHandle(renderPass);
+  }
+
+  vkDestroyRenderPass(device: VkHandle, renderPass: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkDestroyRenderPass);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(renderPass);
+  }
+
+  vkCreateFramebuffer(device: VkHandle, info: VkFramebufferCreateInfo, framebuffer: VkHandle, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkCreateFramebuffer, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(info.renderPass);
+    this.cs.writeU32(info.attachments.length);
+    for (const att of info.attachments) {
+      this.cs.writeHandle(att);
+    }
+    this.cs.writeU32(info.width);
+    this.cs.writeU32(info.height);
+    this.cs.writeHandle(framebuffer);
+  }
+
+  vkDestroyFramebuffer(device: VkHandle, framebuffer: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkDestroyFramebuffer);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(framebuffer);
+  }
+
+  vkCreateGraphicsPipelines(
+    device: VkHandle,
+    info: VkGraphicsPipelineCreateInfo,
+    pipeline: VkHandle,
+    reply = false,
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCreateGraphicsPipelines, reply);
+    this.cs.writeHandle(device);
+    this.cs.writeHandle(info.vertexShader);
+    this.cs.writeString(info.vertexEntry);
+    this.cs.writeHandle(info.fragmentShader);
+    this.cs.writeString(info.fragmentEntry);
+    this.cs.writeU32(info.bindings.length);
+    for (const b of info.bindings) {
+      this.cs.writeU32(b.binding);
+      this.cs.writeU32(b.stride);
+    }
+    this.cs.writeU32(info.attributes.length);
+    for (const a of info.attributes) {
+      this.cs.writeU32(a.location);
+      this.cs.writeU32(a.binding);
+      this.cs.writeU32(a.format);
+      this.cs.writeU32(a.offset);
+    }
+    this.cs.writeU32(info.topology);
+    this.cs.writeU32(info.cullMode);
+    this.cs.writeU32(info.depthTestEnable ? 1 : 0);
+    this.cs.writeU32(info.depthWriteEnable ? 1 : 0);
+    this.cs.writeU32(info.depthCompareOp);
+    this.cs.writeHandle(info.layout);
+    this.cs.writeHandle(info.renderPass);
+    this.cs.writeHandle(pipeline);
+  }
+
+  vkCmdBeginRenderPass(
+    commandBuffer: VkHandle,
+    renderPass: VkHandle,
+    framebuffer: VkHandle,
+    clearColor: [number, number, number, number] = [0, 0, 0, 1],
+    clearDepth = 1.0,
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCmdBeginRenderPass);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeHandle(renderPass);
+    this.cs.writeHandle(framebuffer);
+    this.cs.writeF32(clearColor[0]);
+    this.cs.writeF32(clearColor[1]);
+    this.cs.writeF32(clearColor[2]);
+    this.cs.writeF32(clearColor[3]);
+    this.cs.writeF32(clearDepth);
+  }
+
+  vkCmdEndRenderPass(commandBuffer: VkHandle): void {
+    this.header(VK_COMMAND_TYPE.vkCmdEndRenderPass);
+    this.cs.writeHandle(commandBuffer);
+  }
+
+  vkCmdSetViewport(
+    commandBuffer: VkHandle,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    minDepth = 0,
+    maxDepth = 1,
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCmdSetViewport);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeF32(x);
+    this.cs.writeF32(y);
+    this.cs.writeF32(width);
+    this.cs.writeF32(height);
+    this.cs.writeF32(minDepth);
+    this.cs.writeF32(maxDepth);
+  }
+
+  vkCmdSetScissor(commandBuffer: VkHandle, x: number, y: number, width: number, height: number): void {
+    this.header(VK_COMMAND_TYPE.vkCmdSetScissor);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeU32(x);
+    this.cs.writeU32(y);
+    this.cs.writeU32(width);
+    this.cs.writeU32(height);
+  }
+
+  vkCmdBindVertexBuffers(
+    commandBuffer: VkHandle,
+    firstBinding: number,
+    buffers: VkHandle[],
+    offsets: bigint[],
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCmdBindVertexBuffers);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeU32(firstBinding);
+    this.cs.writeU32(buffers.length);
+    for (let i = 0; i < buffers.length; i++) {
+      this.cs.writeHandle(buffers[i]);
+      this.cs.writeU64(offsets[i] ?? 0n);
+    }
+  }
+
+  vkCmdBindIndexBuffer(commandBuffer: VkHandle, buffer: VkHandle, offset: bigint, indexType: number): void {
+    this.header(VK_COMMAND_TYPE.vkCmdBindIndexBuffer);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeHandle(buffer);
+    this.cs.writeU64(offset);
+    this.cs.writeU32(indexType);
+  }
+
+  vkCmdDraw(
+    commandBuffer: VkHandle,
+    vertexCount: number,
+    instanceCount = 1,
+    firstVertex = 0,
+    firstInstance = 0,
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCmdDraw);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeU32(vertexCount);
+    this.cs.writeU32(instanceCount);
+    this.cs.writeU32(firstVertex);
+    this.cs.writeU32(firstInstance);
+  }
+
+  vkCmdDrawIndexed(
+    commandBuffer: VkHandle,
+    indexCount: number,
+    instanceCount = 1,
+    firstIndex = 0,
+    vertexOffset = 0,
+    firstInstance = 0,
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCmdDrawIndexed);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeU32(indexCount);
+    this.cs.writeU32(instanceCount);
+    this.cs.writeU32(firstIndex);
+    this.cs.writeI32(vertexOffset);
+    this.cs.writeU32(firstInstance);
+  }
+
+  vkCmdCopyBufferToImage(
+    commandBuffer: VkHandle,
+    srcBuffer: VkHandle,
+    dstImage: VkHandle,
+    bufferOffset: bigint,
+    width: number,
+    height: number,
+  ): void {
+    this.header(VK_COMMAND_TYPE.vkCmdCopyBufferToImage);
+    this.cs.writeHandle(commandBuffer);
+    this.cs.writeHandle(srcBuffer);
+    this.cs.writeHandle(dstImage);
+    this.cs.writeU64(bufferOffset);
+    this.cs.writeU32(width);
+    this.cs.writeU32(height);
+  }
+
+  vkQueuePresentKHR(queue: VkHandle, image: VkHandle, reply = false): void {
+    this.header(VK_COMMAND_TYPE.vkQueuePresentKHR, reply);
+    this.cs.writeHandle(queue);
+    this.cs.writeHandle(image);
   }
 
   finish(): Uint8Array {

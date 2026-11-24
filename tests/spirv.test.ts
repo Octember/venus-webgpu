@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createVectorAddSpirv, SpirvTranslator } from "../src/shader/spirv.ts";
+import {
+  createCubeFragmentSpirv,
+  createCubeVertexSpirv,
+  createVectorAddSpirv,
+  SpirvTranslator,
+} from "../src/shader/spirv.ts";
 
 describe("SpirvTranslator (naga-wasm)", () => {
   test("translates SPIR-V vector-add compute shader to valid WGSL and caches it", async () => {
@@ -16,5 +21,18 @@ describe("SpirvTranslator (naga-wasm)", () => {
     const second = await translator.translateToWgsl(spirv);
     expect(second.hash).toBe(first.hash);
     expect(second.wgsl).toBe(first.wgsl);
+  });
+
+  test("translates SPIR-V cube vertex and fragment shaders to valid WGSL", async () => {
+    const translator = new SpirvTranslator();
+    const vs = await translator.translateToWgsl(createCubeVertexSpirv());
+    expect(vs.wgsl).toContain("@vertex");
+    expect(vs.wgsl).toContain("@group(0) @binding(0)");
+    expect(vs.wgsl).toContain("@location(0)");
+    expect(vs.wgsl).toContain("@location(1)");
+
+    const fs = await translator.translateToWgsl(createCubeFragmentSpirv());
+    expect(fs.wgsl).toContain("@fragment");
+    expect(fs.wgsl).toContain("@location(0)");
   });
 });

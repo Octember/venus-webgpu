@@ -775,6 +775,323 @@ export class VenusCommandDecoder {
         break;
       }
 
+      case VK_COMMAND_TYPE.vkCreateImage: {
+        const device = dec.readHandle();
+        const format = dec.readU32();
+        const width = dec.readU32();
+        const height = dec.readU32();
+        const usage = dec.readU32();
+        const image = dec.readHandle();
+        const res = this.handler.vkCreateImage?.(device, { format, width, height, usage }, image) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkDestroyImage: {
+        const device = dec.readHandle();
+        const image = dec.readHandle();
+        this.handler.vkDestroyImage?.(device, image);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkGetImageMemoryRequirements: {
+        const device = dec.readHandle();
+        const image = dec.readHandle();
+        const req = this.handler.vkGetImageMemoryRequirements?.(device, image) ?? {
+          size: 0n,
+          alignment: 256n,
+          memoryTypeBits: 3,
+        };
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeU64(req.size);
+          reply.writeU64(req.alignment);
+          reply.writeU32(req.memoryTypeBits);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkBindImageMemory: {
+        const device = dec.readHandle();
+        const image = dec.readHandle();
+        const memory = dec.readHandle();
+        const offset = dec.readU64();
+        const res = this.handler.vkBindImageMemory?.(device, image, memory, offset) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCreateImageView: {
+        const device = dec.readHandle();
+        const image = dec.readHandle();
+        const format = dec.readU32();
+        const aspectMask = dec.readU32();
+        const view = dec.readHandle();
+        const res = this.handler.vkCreateImageView?.(device, { image, format, aspectMask }, view) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkDestroyImageView: {
+        const device = dec.readHandle();
+        const view = dec.readHandle();
+        this.handler.vkDestroyImageView?.(device, view);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCreateSampler: {
+        const device = dec.readHandle();
+        const magFilter = dec.readU32();
+        const minFilter = dec.readU32();
+        const sampler = dec.readHandle();
+        const res = this.handler.vkCreateSampler?.(device, { magFilter, minFilter }, sampler) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkDestroySampler: {
+        const device = dec.readHandle();
+        const sampler = dec.readHandle();
+        this.handler.vkDestroySampler?.(device, sampler);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCreateRenderPass: {
+        const device = dec.readHandle();
+        const hasColor = dec.readU32() !== 0;
+        const colorAttachment = hasColor
+          ? { format: dec.readU32(), loadOp: dec.readU32(), storeOp: dec.readU32() }
+          : undefined;
+        const hasDepth = dec.readU32() !== 0;
+        const depthAttachment = hasDepth
+          ? { format: dec.readU32(), loadOp: dec.readU32(), storeOp: dec.readU32() }
+          : undefined;
+        const renderPass = dec.readHandle();
+        const res =
+          this.handler.vkCreateRenderPass?.(device, { colorAttachment, depthAttachment }, renderPass) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkDestroyRenderPass: {
+        const device = dec.readHandle();
+        const renderPass = dec.readHandle();
+        this.handler.vkDestroyRenderPass?.(device, renderPass);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCreateFramebuffer: {
+        const device = dec.readHandle();
+        const renderPass = dec.readHandle();
+        const attCount = dec.readU32();
+        const attachments: bigint[] = [];
+        for (let i = 0; i < attCount; i++) attachments.push(dec.readHandle());
+        const width = dec.readU32();
+        const height = dec.readU32();
+        const framebuffer = dec.readHandle();
+        const res =
+          this.handler.vkCreateFramebuffer?.(device, { renderPass, attachments, width, height }, framebuffer) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkDestroyFramebuffer: {
+        const device = dec.readHandle();
+        const framebuffer = dec.readHandle();
+        this.handler.vkDestroyFramebuffer?.(device, framebuffer);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCreateGraphicsPipelines: {
+        const device = dec.readHandle();
+        const vertexShader = dec.readHandle();
+        const vertexEntry = dec.readString();
+        const fragmentShader = dec.readHandle();
+        const fragmentEntry = dec.readString();
+        const bindingCount = dec.readU32();
+        const bindings = [];
+        for (let i = 0; i < bindingCount; i++) {
+          bindings.push({ binding: dec.readU32(), stride: dec.readU32() });
+        }
+        const attrCount = dec.readU32();
+        const attributes = [];
+        for (let i = 0; i < attrCount; i++) {
+          attributes.push({
+            location: dec.readU32(),
+            binding: dec.readU32(),
+            format: dec.readU32(),
+            offset: dec.readU32(),
+          });
+        }
+        const topology = dec.readU32();
+        const cullMode = dec.readU32();
+        const depthTestEnable = dec.readU32() !== 0;
+        const depthWriteEnable = dec.readU32() !== 0;
+        const depthCompareOp = dec.readU32();
+        const layout = dec.readHandle();
+        const renderPass = dec.readHandle();
+        const pipeline = dec.readHandle();
+        const res =
+          this.handler.vkCreateGraphicsPipelines?.(
+            device,
+            {
+              vertexShader,
+              vertexEntry,
+              fragmentShader,
+              fragmentEntry,
+              bindings,
+              attributes,
+              topology,
+              cullMode,
+              depthTestEnable,
+              depthWriteEnable,
+              depthCompareOp,
+              layout,
+              renderPass,
+            },
+            pipeline,
+          ) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdBeginRenderPass: {
+        const commandBuffer = dec.readHandle();
+        const renderPass = dec.readHandle();
+        const framebuffer = dec.readHandle();
+        const clearColor: [number, number, number, number] = [
+          dec.readF32(),
+          dec.readF32(),
+          dec.readF32(),
+          dec.readF32(),
+        ];
+        const clearDepth = dec.readF32();
+        this.handler.vkCmdBeginRenderPass?.(commandBuffer, renderPass, framebuffer, clearColor, clearDepth);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdEndRenderPass: {
+        const commandBuffer = dec.readHandle();
+        this.handler.vkCmdEndRenderPass?.(commandBuffer);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdSetViewport: {
+        const commandBuffer = dec.readHandle();
+        const x = dec.readF32();
+        const y = dec.readF32();
+        const width = dec.readF32();
+        const height = dec.readF32();
+        const minDepth = dec.readF32();
+        const maxDepth = dec.readF32();
+        this.handler.vkCmdSetViewport?.(commandBuffer, x, y, width, height, minDepth, maxDepth);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdSetScissor: {
+        const commandBuffer = dec.readHandle();
+        const x = dec.readU32();
+        const y = dec.readU32();
+        const width = dec.readU32();
+        const height = dec.readU32();
+        this.handler.vkCmdSetScissor?.(commandBuffer, x, y, width, height);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdBindVertexBuffers: {
+        const commandBuffer = dec.readHandle();
+        const firstBinding = dec.readU32();
+        const count = dec.readU32();
+        const buffers: bigint[] = [];
+        const offsets: bigint[] = [];
+        for (let i = 0; i < count; i++) {
+          buffers.push(dec.readHandle());
+          offsets.push(dec.readU64());
+        }
+        this.handler.vkCmdBindVertexBuffers?.(commandBuffer, firstBinding, buffers, offsets);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdBindIndexBuffer: {
+        const commandBuffer = dec.readHandle();
+        const buffer = dec.readHandle();
+        const offset = dec.readU64();
+        const indexType = dec.readU32();
+        this.handler.vkCmdBindIndexBuffer?.(commandBuffer, buffer, offset, indexType);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdDraw: {
+        const commandBuffer = dec.readHandle();
+        const vertexCount = dec.readU32();
+        const instanceCount = dec.readU32();
+        const firstVertex = dec.readU32();
+        const firstInstance = dec.readU32();
+        this.handler.vkCmdDraw?.(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdDrawIndexed: {
+        const commandBuffer = dec.readHandle();
+        const indexCount = dec.readU32();
+        const instanceCount = dec.readU32();
+        const firstIndex = dec.readU32();
+        const vertexOffset = dec.readI32();
+        const firstInstance = dec.readU32();
+        this.handler.vkCmdDrawIndexed?.(
+          commandBuffer,
+          indexCount,
+          instanceCount,
+          firstIndex,
+          vertexOffset,
+          firstInstance,
+        );
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkCmdCopyBufferToImage: {
+        const commandBuffer = dec.readHandle();
+        const srcBuffer = dec.readHandle();
+        const dstImage = dec.readHandle();
+        const bufferOffset = dec.readU64();
+        const width = dec.readU32();
+        const height = dec.readU32();
+        this.handler.vkCmdCopyBufferToImage?.(commandBuffer, srcBuffer, dstImage, bufferOffset, width, height);
+        break;
+      }
+
+      case VK_COMMAND_TYPE.vkQueuePresentKHR: {
+        const queue = dec.readHandle();
+        const image = dec.readHandle();
+        const res = (await this.handler.vkQueuePresentKHR?.(queue, image)) ?? 0;
+        if (wantsReply) {
+          this.writeReplyHeader(reply, type, flags);
+          reply.writeI32(res);
+        }
+        break;
+      }
+
       default:
         throw new Error(`Unsupported Venus command type: ${type}`);
     }

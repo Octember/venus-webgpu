@@ -1,7 +1,15 @@
 import {
+  VK_ATTACHMENT_LOAD_OP,
+  VK_ATTACHMENT_STORE_OP,
+  VK_COMPARE_OP,
+  VK_CULL_MODE,
   VK_DESCRIPTOR_TYPE,
+  VK_FORMAT,
+  VK_IMAGE_USAGE,
+  VK_INDEX_TYPE,
   VK_MEMORY_PROPERTY,
   VK_PHYSICAL_DEVICE_TYPE,
+  VK_PRIMITIVE_TOPOLOGY,
   VK_QUEUE_FLAGS,
   VK_RESULT,
   type VkResult,
@@ -9,13 +17,19 @@ import {
 import type {
   VenusCommandHandler,
   VkDescriptorSetLayoutBinding,
+  VkFramebufferCreateInfo,
+  VkGraphicsPipelineCreateInfo,
   VkHandle,
+  VkImageCreateInfo,
+  VkImageViewCreateInfo,
   VkMappedMemoryRange,
   VkMemoryRequirements,
   VkPhysicalDeviceMemoryProperties,
   VkPhysicalDeviceProperties,
   VkQueueFamilyProperties,
+  VkRenderPassCreateInfo,
   VkRingCreateInfoMESA,
+  VkSamplerCreateInfo,
   VkSubmitInfo,
   VkWriteDescriptorSet,
 } from "../protocol/types.ts";
@@ -32,18 +46,101 @@ function alignUp(n: number, align: number): number {
 export interface WebGpuVenusBackendOptions {
   device: GPUDevice;
   translator?: SpirvTranslator;
+  canvasContext?: GPUCanvasContext;
+}
+
+function vkFormatToWebGpu(format: number): GPUTextureFormat {
+  switch (format) {
+    case VK_FORMAT.B8G8R8A8_UNORM:
+      return "bgra8unorm";
+    case VK_FORMAT.D32_SFLOAT:
+      return "depth32float";
+    case VK_FORMAT.D24_UNORM_S8_UINT:
+      return "depth24plus-stencil8";
+    case VK_FORMAT.R8G8B8A8_UNORM:
+    default:
+      return "rgba8unorm";
+  }
+}
+
+function vkVertexFormatToWebGpu(format: number): GPUVertexFormat {
+  switch (format) {
+    case VK_FORMAT.R32G32_SFLOAT:
+      return "float32x2";
+    case VK_FORMAT.R32G32B32A32_SFLOAT:
+      return "float32x4";
+    case VK_FORMAT.R32G32B32_SFLOAT:
+    default:
+      return "float32x3";
+  }
+}
+
+function vkTopologyToWebGpu(topology: number): GPUPrimitiveTopology {
+  switch (topology) {
+    case VK_PRIMITIVE_TOPOLOGY.POINT_LIST:
+      return "point-list";
+    case VK_PRIMITIVE_TOPOLOGY.LINE_LIST:
+      return "line-list";
+    case VK_PRIMITIVE_TOPOLOGY.LINE_STRIP:
+      return "line-strip";
+    case VK_PRIMITIVE_TOPOLOGY.TRIANGLE_STRIP:
+      return "triangle-strip";
+    case VK_PRIMITIVE_TOPOLOGY.TRIANGLE_LIST:
+    default:
+      return "triangle-list";
+  }
+}
+
+function vkCullModeToWebGpu(cullMode: number): GPUCullMode {
+  switch (cullMode) {
+    case VK_CULL_MODE.FRONT:
+      return "front";
+    case VK_CULL_MODE.BACK:
+      return "back";
+    case VK_CULL_MODE.NONE:
+    default:
+      return "none";
+  }
+}
+
+function vkCompareOpToWebGpu(op: number): GPUCompareFunction {
+  switch (op) {
+    case VK_COMPARE_OP.NEVER:
+      return "never";
+    case VK_COMPARE_OP.EQUAL:
+      return "equal";
+    case VK_COMPARE_OP.LESS_OR_EQUAL:
+      return "less-equal";
+    case VK_COMPARE_OP.GREATER:
+      return "greater";
+    case VK_COMPARE_OP.NOT_EQUAL:
+      return "not-equal";
+    case VK_COMPARE_OP.GREATER_OR_EQUAL:
+      return "greater-equal";
+    case VK_COMPARE_OP.ALWAYS:
+      return "always";
+    case VK_COMPARE_OP.LESS:
+    default:
+      return "less";
+  }
 }
 
 export class WebGpuVenusBackend implements VenusCommandHandler {
   readonly device: GPUDevice;
   readonly translator: SpirvTranslator;
   readonly objects = new VenusObjectTable();
+  private canvasContext?: GPUCanvasContext;
   private pendingWork: Promise<void> = Promise.resolve();
   private readonly rings = new Map<bigint, VkRingCreateInfoMESA>();
 
   constructor(opts: WebGpuVenusBackendOptions) {
     this.device = opts.device;
     this.translator = opts.translator ?? new SpirvTranslator();
+    this.canvasContext = opts.canvasContext;
+  }
+
+  setCanvasContext(ctx: GPUCanvasContext): void {
+    this.canvasContext = ctx;
   }
 
   /** Expose host-visible backing memory for direct guest/test reads & writes. */
@@ -137,7 +234,14 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const size = alignUp(Math.max(4, Number(allocationSize)), ALIGNMENT);
     const gpuBuffer = this.device.createBuffer({
       size,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      usage:
+        GPUBufferUsage.STORAGE |
+        GPUBufferUsage.UNIFORM |
+        GPUBufferUsage.VERTEX |
+        GPUBufferUsage.INDEX |
+        GPUBufferUsage.INDIRECT |
+        GPUBufferUsage.COPY_SRC |
+        GPUBufferUsage.COPY_DST,
     });
     const isHostVisible = memoryTypeIndex === 1;
     this.objects.memories.set(memory, {
@@ -157,8 +261,8 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   vkFreeMemory(_device: VkHandle, memory: VkHandle): void {
     const mem = this.objects.memories.get(memory);
     if (mem) {
-      mem.gpuBuffer.destroy();
       this.objects.memories.delete(memory);
+      void this.pendingWork.catch(() => {}).then(() => mem.gpuBuffer.destroy());
     }
   }
 
@@ -182,9 +286,21 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     for (const r of ranges) {
       const mem = this.objects.memories.get(r.memory);
       if (mem?.hostData) {
-        const off = Number(r.offset);
-        const len = r.size === 0xffffffffffffffffn ? mem.size - off : alignUp(Number(r.size), 4);
-        this.device.queue.writeBuffer(mem.gpuBuffer, off, mem.hostData as Uint8Array<ArrayBuffer>, off, Math.min(len, mem.size - off));
+        const off = Number(r.offset) & ~3;
+        const end =
+          r.size === 0xffffffffffffffffn
+            ? mem.size
+            : Math.min(mem.size, alignUp(Number(r.offset) + Number(r.size), 4));
+        const len = Math.max(0, end - off);
+        if (len > 0) {
+          this.device.queue.writeBuffer(
+            mem.gpuBuffer,
+            off,
+            mem.hostData as Uint8Array<ArrayBuffer>,
+            off,
+            len,
+          );
+        }
         mem.dirty = false;
       }
     }
@@ -248,17 +364,31 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     bindings: VkDescriptorSetLayoutBinding[],
     layout: VkHandle,
   ): VkResult {
-    const entries: GPUBindGroupLayoutEntry[] = bindings.map((b) => ({
-      binding: b.binding,
-      visibility: GPUShaderStage.COMPUTE,
-      buffer: {
-        type:
-          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER ||
-          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC
-            ? "uniform"
-            : "storage",
-      },
-    }));
+    const entries: GPUBindGroupLayoutEntry[] = bindings.map((b) => {
+      let visibility = 0;
+      if (b.stageFlags & 0x00000001) visibility |= GPUShaderStage.VERTEX;
+      if (b.stageFlags & 0x00000010) visibility |= GPUShaderStage.FRAGMENT;
+      if (b.stageFlags & 0x00000020) visibility |= GPUShaderStage.COMPUTE;
+      if (visibility === 0) {
+        visibility = GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
+      }
+      const isUniform =
+        b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER ||
+        b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC;
+      const hasDynamicOffset =
+        b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
+        b.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC;
+      const storageType: GPUBufferBindingType =
+        (visibility & GPUShaderStage.VERTEX) !== 0 ? "read-only-storage" : "storage";
+      return {
+        binding: b.binding,
+        visibility,
+        buffer: {
+          type: isUniform ? "uniform" : storageType,
+          hasDynamicOffset,
+        },
+      };
+    });
     const gpuLayout = this.device.createBindGroupLayout({ entries });
     this.objects.descriptorSetLayouts.set(layout, { handle: layout, bindings, gpuLayout });
     return VK_RESULT.VK_SUCCESS;
@@ -303,7 +433,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       layout: layout.gpuLayout,
       compute: { module: mod.module, entryPoint },
     });
-    this.objects.pipelines.set(pipeline, { handle: pipeline, layout, gpuPipeline });
+    this.objects.pipelines.set(pipeline, { handle: pipeline, kind: "compute", layout, gpuPipeline });
     return VK_RESULT.VK_SUCCESS;
   }
 
@@ -397,15 +527,15 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     return VK_RESULT.VK_SUCCESS;
   }
 
-  vkCmdBindPipeline(commandBuffer: VkHandle, _pipelineBindPoint: number, pipelineHandle: VkHandle): void {
+  vkCmdBindPipeline(commandBuffer: VkHandle, pipelineBindPoint: number, pipelineHandle: VkHandle): void {
     const cb = this.objects.commandBuffers.get(commandBuffer);
     const pipeline = this.objects.pipelines.get(pipelineHandle);
-    if (cb && pipeline) cb.commands.push({ type: "bindPipeline", pipeline });
+    if (cb && pipeline) cb.commands.push({ type: "bindPipeline", bindPoint: pipelineBindPoint, pipeline });
   }
 
   vkCmdBindDescriptorSets(
     commandBuffer: VkHandle,
-    _pipelineBindPoint: number,
+    pipelineBindPoint: number,
     _layout: VkHandle,
     firstSet: number,
     descriptorSets: VkHandle[],
@@ -416,7 +546,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const sets = descriptorSets
       .map((h) => this.objects.descriptorSets.get(h))
       .filter((s): s is VenusDescriptorSet => s !== undefined);
-    cb.commands.push({ type: "bindDescriptorSets", firstSet, sets, dynamicOffsets });
+    cb.commands.push({ type: "bindDescriptorSets", bindPoint: pipelineBindPoint, firstSet, sets, dynamicOffsets });
   }
 
   vkCmdDispatch(commandBuffer: VkHandle, x: number, y: number, z: number): void {
@@ -457,11 +587,13 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const cb = this.objects.commandBuffers.get(commandBuffer);
     const dst = this.objects.buffers.get(dstHandle);
     if (cb && dst) {
+      const off = Number(dstOffset);
+      const byteSize = size === 0xffffffffffffffffn ? Math.max(0, dst.size - off) : Number(size);
       cb.commands.push({
         type: "fillBuffer",
         dst,
-        dstOffset: Number(dstOffset),
-        size: Number(size),
+        dstOffset: off,
+        size: byteSize,
         data,
       });
     }
@@ -496,21 +628,25 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
   async vkWaitForFences(
     _device: VkHandle,
     fences: VkHandle[],
-    _waitAll: boolean,
-    _timeout: bigint,
+    waitAll: boolean,
+    timeout: bigint,
   ): Promise<VkResult> {
-    await this.pendingWork;
-    for (const h of fences) {
-      const f = this.objects.fences.get(h);
-      if (f) f.signaled = true;
+    const isReady = () => {
+      if (fences.length === 0) return true;
+      return waitAll
+        ? fences.every((h) => this.objects.fences.get(h)?.signaled === true)
+        : fences.some((h) => this.objects.fences.get(h)?.signaled === true);
+    };
+    if (!isReady() && timeout !== 0n) {
+      await this.pendingWork.catch(() => {});
     }
-    return VK_RESULT.VK_SUCCESS;
+    return isReady() ? VK_RESULT.VK_SUCCESS : VK_RESULT.VK_TIMEOUT;
   }
 
   vkQueueSubmit(_queue: VkHandle, submits: VkSubmitInfo[], fenceHandle: VkHandle): VkResult {
-    // Flush any dirty host-visible memory to GPU before encoding.
+    // Flush any dirty or persistently mapped host-coherent memory to GPU before encoding.
     for (const mem of this.objects.memories.values()) {
-      if (mem.hostData && mem.dirty) {
+      if (mem.hostData && (mem.dirty || mem.mappedSize > 0)) {
         this.device.queue.writeBuffer(mem.gpuBuffer, 0, mem.hostData as Uint8Array<ArrayBuffer>);
         mem.dirty = false;
       }
@@ -518,38 +654,66 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
 
     const encoder = this.device.createCommandEncoder();
     const touchedHostMemories = new Set<VenusDeviceMemory>();
+    const stagingBuffers: GPUBuffer[] = [];
 
     for (const submit of submits) {
       for (const cbHandle of submit.commandBuffers) {
         const cb = this.objects.commandBuffers.get(cbHandle);
         if (!cb) continue;
 
-        let pass: GPUComputePassEncoder | null = null;
+        let computePass: GPUComputePassEncoder | null = null;
+        let renderPass: GPURenderPassEncoder | null = null;
         const endPass = () => {
-          if (pass) {
-            pass.end();
-            pass = null;
+          if (computePass) {
+            computePass.end();
+            computePass = null;
+          }
+          if (renderPass) {
+            renderPass.end();
+            renderPass = null;
           }
         };
-        const ensurePass = () => {
-          if (!pass) pass = encoder.beginComputePass();
-          return pass;
+        const ensureComputePass = () => {
+          if (renderPass) {
+            renderPass.end();
+            renderPass = null;
+          }
+          if (!computePass) computePass = encoder.beginComputePass();
+          return computePass;
         };
 
         for (const cmd of cb.commands) {
           switch (cmd.type) {
             case "bindPipeline": {
-              ensurePass().setPipeline(cmd.pipeline.gpuPipeline);
+              if (cmd.pipeline.kind === "graphics" && renderPass) {
+                renderPass.setPipeline(cmd.pipeline.gpuPipeline);
+              } else if (cmd.pipeline.kind === "compute") {
+                ensureComputePass().setPipeline(cmd.pipeline.gpuPipeline);
+              }
               break;
             }
             case "bindDescriptorSets": {
-              const p = ensurePass();
+              const p: GPUComputePassEncoder | GPURenderPassEncoder = renderPass ?? ensureComputePass();
+              let dynOffsetCursor = 0;
               for (let i = 0; i < cmd.sets.length; i++) {
                 const set = cmd.sets[i];
                 const bg = this.ensureBindGroup(set);
-                p.setBindGroup(cmd.firstSet + i, bg, cmd.dynamicOffsets);
-                for (const b of set.bindings.values()) {
-                  if (b.buffer.memory?.hostData) {
+                const dynCount = set.layout.bindings.filter(
+                  (b) =>
+                    b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
+                    b.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC,
+                ).length;
+                const slice = cmd.dynamicOffsets.slice(dynOffsetCursor, dynOffsetCursor + dynCount);
+                dynOffsetCursor += dynCount;
+                p.setBindGroup(cmd.firstSet + i, bg, slice);
+                for (const [bindingIdx, b] of set.bindings.entries()) {
+                  const layoutBinding = set.layout.bindings.find((lb) => lb.binding === bindingIdx);
+                  const isWritableStorage =
+                    layoutBinding &&
+                    (layoutBinding.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER ||
+                      layoutBinding.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC) &&
+                    (layoutBinding.stageFlags & 0x00000001) === 0;
+                  if (isWritableStorage && b.buffer.memory?.hostData) {
                     touchedHostMemories.add(b.buffer.memory);
                   }
                 }
@@ -557,7 +721,123 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
               break;
             }
             case "dispatch": {
-              ensurePass().dispatchWorkgroups(cmd.x, cmd.y, cmd.z);
+              ensureComputePass().dispatchWorkgroups(cmd.x, cmd.y, cmd.z);
+              break;
+            }
+            case "beginRenderPass": {
+              endPass();
+              const colorView = cmd.framebuffer.attachments[0]?.gpuView;
+              const depthView = cmd.framebuffer.attachments[1]?.gpuView;
+              const rpInfo = cmd.renderPass.info;
+              const colorAttachments: GPURenderPassColorAttachment[] = colorView
+                ? [
+                    {
+                      view: colorView,
+                      clearValue: {
+                        r: cmd.clearColor[0],
+                        g: cmd.clearColor[1],
+                        b: cmd.clearColor[2],
+                        a: cmd.clearColor[3],
+                      },
+                      loadOp:
+                        rpInfo.colorAttachment?.loadOp === VK_ATTACHMENT_LOAD_OP.CLEAR
+                          ? "clear"
+                          : "load",
+                      storeOp:
+                        rpInfo.colorAttachment?.storeOp === VK_ATTACHMENT_STORE_OP.DONT_CARE
+                          ? "discard"
+                          : "store",
+                    },
+                  ]
+                : [];
+              const depthStencilAttachment: GPURenderPassDepthStencilAttachment | undefined = depthView
+                ? {
+                    view: depthView,
+                    depthClearValue: cmd.clearDepth,
+                    depthLoadOp:
+                      rpInfo.depthAttachment?.loadOp === VK_ATTACHMENT_LOAD_OP.CLEAR
+                        ? "clear"
+                        : "load",
+                    depthStoreOp:
+                      rpInfo.depthAttachment?.storeOp === VK_ATTACHMENT_STORE_OP.DONT_CARE
+                        ? "discard"
+                        : "store",
+                  }
+                : undefined;
+              renderPass = encoder.beginRenderPass({
+                colorAttachments,
+                depthStencilAttachment,
+              });
+              break;
+            }
+            case "endRenderPass": {
+              if (renderPass) {
+                renderPass.end();
+                renderPass = null;
+              }
+              break;
+            }
+            case "setViewport": {
+              renderPass?.setViewport(cmd.x, cmd.y, cmd.width, cmd.height, cmd.minDepth, cmd.maxDepth);
+              break;
+            }
+            case "setScissor": {
+              renderPass?.setScissorRect(cmd.x, cmd.y, cmd.width, cmd.height);
+              break;
+            }
+            case "bindVertexBuffers": {
+              if (renderPass) {
+                for (let i = 0; i < cmd.buffers.length; i++) {
+                  const buf = cmd.buffers[i];
+                  if (buf.memory) {
+                    renderPass.setVertexBuffer(
+                      cmd.firstBinding + i,
+                      buf.memory.gpuBuffer,
+                      buf.memoryOffset + (cmd.offsets[i] ?? 0),
+                    );
+                  }
+                }
+              }
+              break;
+            }
+            case "bindIndexBuffer": {
+              if (renderPass && cmd.buffer.memory) {
+                renderPass.setIndexBuffer(
+                  cmd.buffer.memory.gpuBuffer,
+                  cmd.indexType === VK_INDEX_TYPE.UINT16 ? "uint16" : "uint32",
+                  cmd.buffer.memoryOffset + cmd.offset,
+                );
+              }
+              break;
+            }
+            case "draw": {
+              renderPass?.draw(cmd.vertexCount, cmd.instanceCount, cmd.firstVertex, cmd.firstInstance);
+              break;
+            }
+            case "drawIndexed": {
+              renderPass?.drawIndexed(
+                cmd.indexCount,
+                cmd.instanceCount,
+                cmd.firstIndex,
+                cmd.vertexOffset,
+                cmd.firstInstance,
+              );
+              break;
+            }
+            case "copyBufferToImage": {
+              endPass();
+              if (cmd.src.memory) {
+                encoder.copyBufferToTexture(
+                  {
+                    buffer: cmd.src.memory.gpuBuffer,
+                    offset: cmd.src.memoryOffset + cmd.bufferOffset,
+                    bytesPerRow: cmd.width * 4,
+                    rowsPerImage: cmd.height,
+                  },
+                  { texture: cmd.dst.gpuTexture },
+                  { width: cmd.width, height: cmd.height, depthOrArrayLayers: 1 },
+                );
+              }
               break;
             }
             case "copyBuffer": {
@@ -578,14 +858,26 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
             }
             case "fillBuffer": {
               endPass();
-              if (cmd.dst.memory) {
-                const words = new Uint32Array(cmd.size >>> 2);
+              if (cmd.dst.memory && cmd.size >= 4) {
+                const alignedSize = alignUp(cmd.size, 4);
+                const words = new Uint32Array(alignedSize >>> 2);
                 words.fill(cmd.data >>> 0);
-                this.device.queue.writeBuffer(
+                const staging = this.device.createBuffer({
+                  size: alignedSize,
+                  usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+                this.device.queue.writeBuffer(staging, 0, words);
+                encoder.copyBufferToBuffer(
+                  staging,
+                  0,
                   cmd.dst.memory.gpuBuffer,
                   cmd.dst.memoryOffset + cmd.dstOffset,
-                  words,
+                  alignedSize,
                 );
+                stagingBuffers.push(staging);
+                if (cmd.dst.memory.hostData) {
+                  touchedHostMemories.add(cmd.dst.memory);
+                }
               }
               break;
             }
@@ -601,20 +893,25 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       mem.needsReadback = true;
     }
 
-    const work = (async () => {
-      if (typeof this.device.queue.onSubmittedWorkDone === "function") {
-        await this.device.queue.onSubmittedWorkDone();
-      }
-      for (const mem of touchedHostMemories) {
-        await this.readbackMemory(mem);
-      }
-      if (fenceHandle !== 0n) {
-        const f = this.objects.fences.get(fenceHandle);
-        if (f) f.signaled = true;
-      }
-    })();
-
-    this.pendingWork = this.pendingWork.then(() => work);
+    this.pendingWork = this.pendingWork
+      .catch(() => {})
+      .then(async () => {
+        if (typeof this.device.queue.onSubmittedWorkDone === "function") {
+          await this.device.queue.onSubmittedWorkDone();
+        }
+        for (const staging of stagingBuffers) {
+          staging.destroy();
+        }
+        for (const mem of touchedHostMemories) {
+          if (!mem.dirty) {
+            await this.readbackMemory(mem);
+          }
+        }
+        if (fenceHandle !== 0n) {
+          const f = this.objects.fences.get(fenceHandle);
+          if (f) f.signaled = true;
+        }
+      });
     return VK_RESULT.VK_SUCCESS;
   }
 
@@ -634,6 +931,323 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
 
   vkDestroyRingMESA(ringId: bigint): void {
     this.rings.delete(ringId);
+  }
+
+  private replyStream: { resourceId: number; offset: number; size: number; position: number } | null = null;
+
+  vkSetReplyCommandStreamMESA(resourceId: number, offset: bigint, size: bigint): void {
+    this.replyStream = { resourceId, offset: Number(offset), size: Number(size), position: 0 };
+  }
+
+  vkSeekReplyCommandStreamMESA(position: bigint): void {
+    if (this.replyStream) {
+      this.replyStream.position = Number(position);
+    }
+  }
+
+  getReplyStream(): { resourceId: number; offset: number; size: number; position: number } | null {
+    return this.replyStream;
+  }
+
+  // Phase 2: Graphics & Presentation
+
+  vkCreateImage(_device: VkHandle, info: VkImageCreateInfo, image: VkHandle): VkResult {
+    const format = vkFormatToWebGpu(info.format);
+    const texUsage =
+      typeof GPUTextureUsage !== "undefined"
+        ? GPUTextureUsage
+        : { COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04, STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10 };
+    let usage = texUsage.COPY_SRC | texUsage.COPY_DST;
+    if (info.usage & VK_IMAGE_USAGE.SAMPLED) usage |= texUsage.TEXTURE_BINDING;
+    if (info.usage & VK_IMAGE_USAGE.STORAGE) usage |= texUsage.STORAGE_BINDING;
+    if (info.usage & (VK_IMAGE_USAGE.COLOR_ATTACHMENT | VK_IMAGE_USAGE.DEPTH_STENCIL_ATTACHMENT)) {
+      usage |= texUsage.RENDER_ATTACHMENT;
+    }
+    const gpuTexture = this.device.createTexture({
+      size: { width: info.width, height: info.height, depthOrArrayLayers: 1 },
+      format,
+      usage,
+    });
+    this.objects.images.set(image, {
+      handle: image,
+      format: info.format,
+      width: info.width,
+      height: info.height,
+      usage: info.usage,
+      gpuTexture,
+      memory: null,
+      memoryOffset: 0,
+    });
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkDestroyImage(_device: VkHandle, image: VkHandle): void {
+    const img = this.objects.images.get(image);
+    if (img) {
+      this.objects.images.delete(image);
+      void this.pendingWork.catch(() => {}).then(() => img.gpuTexture.destroy());
+    }
+  }
+
+  vkGetImageMemoryRequirements(_device: VkHandle, image: VkHandle): VkMemoryRequirements {
+    const img = this.objects.images.get(image);
+    const size = img ? BigInt(alignUp(img.width * img.height * 4, ALIGNMENT)) : 0n;
+    return { size, alignment: BigInt(ALIGNMENT), memoryTypeBits: 0b11 };
+  }
+
+  vkBindImageMemory(_device: VkHandle, image: VkHandle, memory: VkHandle, offset: bigint): VkResult {
+    const img = this.objects.images.get(image);
+    const mem = this.objects.memories.get(memory);
+    if (!img || !mem) return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
+    img.memory = mem;
+    img.memoryOffset = Number(offset);
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkCreateImageView(_device: VkHandle, info: VkImageViewCreateInfo, view: VkHandle): VkResult {
+    const img = this.objects.images.get(info.image);
+    if (!img) return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
+    const gpuView = img.gpuTexture.createView();
+    this.objects.imageViews.set(view, { handle: view, image: img, format: info.format, gpuView });
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkDestroyImageView(_device: VkHandle, view: VkHandle): void {
+    this.objects.imageViews.delete(view);
+  }
+
+  vkCreateSampler(_device: VkHandle, info: VkSamplerCreateInfo, sampler: VkHandle): VkResult {
+    const gpuSampler = this.device.createSampler({
+      magFilter: info.magFilter === 0 ? "nearest" : "linear",
+      minFilter: info.minFilter === 0 ? "nearest" : "linear",
+    });
+    this.objects.samplers.set(sampler, { handle: sampler, gpuSampler });
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkDestroySampler(_device: VkHandle, sampler: VkHandle): void {
+    this.objects.samplers.delete(sampler);
+  }
+
+  vkCreateRenderPass(_device: VkHandle, info: VkRenderPassCreateInfo, renderPass: VkHandle): VkResult {
+    this.objects.renderPasses.set(renderPass, { handle: renderPass, info });
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkDestroyRenderPass(_device: VkHandle, renderPass: VkHandle): void {
+    this.objects.renderPasses.delete(renderPass);
+  }
+
+  vkCreateFramebuffer(_device: VkHandle, info: VkFramebufferCreateInfo, framebuffer: VkHandle): VkResult {
+    const rp = this.objects.renderPasses.get(info.renderPass);
+    if (!rp) return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
+    const attachments = info.attachments
+      .map((h) => this.objects.imageViews.get(h))
+      .filter((v): v is NonNullable<typeof v> => v !== undefined);
+    this.objects.framebuffers.set(framebuffer, {
+      handle: framebuffer,
+      renderPass: rp,
+      attachments,
+      width: info.width,
+      height: info.height,
+    });
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkDestroyFramebuffer(_device: VkHandle, framebuffer: VkHandle): void {
+    this.objects.framebuffers.delete(framebuffer);
+  }
+
+  vkCreateGraphicsPipelines(
+    _device: VkHandle,
+    info: VkGraphicsPipelineCreateInfo,
+    pipeline: VkHandle,
+  ): VkResult {
+    const vs = this.objects.shaderModules.get(info.vertexShader);
+    const fs = this.objects.shaderModules.get(info.fragmentShader);
+    const layout = this.objects.pipelineLayouts.get(info.layout);
+    const rp = this.objects.renderPasses.get(info.renderPass);
+    if (!vs || !fs || !layout || !rp) {
+      return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    const buffers: GPUVertexBufferLayout[] = info.bindings.map((b) => ({
+      arrayStride: b.stride,
+      stepMode: "vertex",
+      attributes: info.attributes
+        .filter((a) => a.binding === b.binding)
+        .map((a) => ({
+          shaderLocation: a.location,
+          offset: a.offset,
+          format: vkVertexFormatToWebGpu(a.format),
+        })),
+    }));
+
+    const colorFormat = rp.info.colorAttachment
+      ? vkFormatToWebGpu(rp.info.colorAttachment.format)
+      : "rgba8unorm";
+    const depthFormat = rp.info.depthAttachment
+      ? vkFormatToWebGpu(rp.info.depthAttachment.format)
+      : undefined;
+
+    const gpuPipeline = this.device.createRenderPipeline({
+      layout: layout.gpuLayout,
+      vertex: {
+        module: vs.module,
+        entryPoint: info.vertexEntry,
+        buffers,
+      },
+      fragment: {
+        module: fs.module,
+        entryPoint: info.fragmentEntry,
+        targets: [{ format: colorFormat }],
+      },
+      primitive: {
+        topology: vkTopologyToWebGpu(info.topology),
+        cullMode: vkCullModeToWebGpu(info.cullMode),
+      },
+      depthStencil: depthFormat
+        ? {
+            format: depthFormat,
+            depthWriteEnabled: info.depthWriteEnable,
+            depthCompare: info.depthTestEnable ? vkCompareOpToWebGpu(info.depthCompareOp) : "always",
+          }
+        : undefined,
+    });
+
+    this.objects.pipelines.set(pipeline, { handle: pipeline, kind: "graphics", layout, gpuPipeline });
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  vkCmdBeginRenderPass(
+    commandBuffer: VkHandle,
+    renderPassHandle: VkHandle,
+    framebufferHandle: VkHandle,
+    clearColor: [number, number, number, number],
+    clearDepth: number,
+  ): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    const renderPass = this.objects.renderPasses.get(renderPassHandle);
+    const framebuffer = this.objects.framebuffers.get(framebufferHandle);
+    if (cb && renderPass && framebuffer) {
+      cb.commands.push({ type: "beginRenderPass", renderPass, framebuffer, clearColor, clearDepth });
+    }
+  }
+
+  vkCmdEndRenderPass(commandBuffer: VkHandle): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    if (cb) cb.commands.push({ type: "endRenderPass" });
+  }
+
+  vkCmdSetViewport(
+    commandBuffer: VkHandle,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    minDepth: number,
+    maxDepth: number,
+  ): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    if (cb) cb.commands.push({ type: "setViewport", x, y, width, height, minDepth, maxDepth });
+  }
+
+  vkCmdSetScissor(commandBuffer: VkHandle, x: number, y: number, width: number, height: number): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    if (cb) cb.commands.push({ type: "setScissor", x, y, width, height });
+  }
+
+  vkCmdBindVertexBuffers(
+    commandBuffer: VkHandle,
+    firstBinding: number,
+    bufferHandles: VkHandle[],
+    offsets: bigint[],
+  ): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    if (!cb) return;
+    const buffers = bufferHandles
+      .map((h) => this.objects.buffers.get(h))
+      .filter((b): b is NonNullable<typeof b> => b !== undefined);
+    cb.commands.push({
+      type: "bindVertexBuffers",
+      firstBinding,
+      buffers,
+      offsets: offsets.map((o) => Number(o)),
+    });
+  }
+
+  vkCmdBindIndexBuffer(commandBuffer: VkHandle, bufferHandle: VkHandle, offset: bigint, indexType: number): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    const buffer = this.objects.buffers.get(bufferHandle);
+    if (cb && buffer) {
+      cb.commands.push({ type: "bindIndexBuffer", buffer, offset: Number(offset), indexType });
+    }
+  }
+
+  vkCmdDraw(
+    commandBuffer: VkHandle,
+    vertexCount: number,
+    instanceCount: number,
+    firstVertex: number,
+    firstInstance: number,
+  ): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    if (cb) cb.commands.push({ type: "draw", vertexCount, instanceCount, firstVertex, firstInstance });
+  }
+
+  vkCmdDrawIndexed(
+    commandBuffer: VkHandle,
+    indexCount: number,
+    instanceCount: number,
+    firstIndex: number,
+    vertexOffset: number,
+    firstInstance: number,
+  ): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    if (cb) {
+      cb.commands.push({ type: "drawIndexed", indexCount, instanceCount, firstIndex, vertexOffset, firstInstance });
+    }
+  }
+
+  vkCmdCopyBufferToImage(
+    commandBuffer: VkHandle,
+    srcHandle: VkHandle,
+    dstHandle: VkHandle,
+    bufferOffset: bigint,
+    width: number,
+    height: number,
+  ): void {
+    const cb = this.objects.commandBuffers.get(commandBuffer);
+    const src = this.objects.buffers.get(srcHandle);
+    const dst = this.objects.images.get(dstHandle);
+    if (cb && src && dst) {
+      cb.commands.push({ type: "copyBufferToImage", src, dst, bufferOffset: Number(bufferOffset), width, height });
+    }
+  }
+
+  async vkQueuePresentKHR(_queue: VkHandle, imageHandle: VkHandle): Promise<VkResult> {
+    await this.pendingWork.catch(() => {});
+    if (this.canvasContext) {
+      this.presentImage(imageHandle, this.canvasContext);
+    }
+    return VK_RESULT.VK_SUCCESS;
+  }
+
+  presentImage(imageHandle: VkHandle, canvasContext: GPUCanvasContext): void {
+    const img = this.objects.images.get(imageHandle);
+    if (!img) return;
+    const dstTexture = canvasContext.getCurrentTexture();
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyTextureToTexture(
+      { texture: img.gpuTexture },
+      { texture: dstTexture },
+      {
+        width: Math.min(img.width, dstTexture.width),
+        height: Math.min(img.height, dstTexture.height),
+        depthOrArrayLayers: 1,
+      },
+    );
+    this.device.queue.submit([encoder.finish()]);
   }
 
   private ensureBindGroup(set: VenusDescriptorSet): GPUBindGroup {

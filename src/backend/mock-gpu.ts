@@ -110,6 +110,19 @@ export function createMockGPUDevice(): GPUDevice {
     createComputePipeline(desc: GPUComputePipelineDescriptor): GPUComputePipeline {
       return desc as unknown as GPUComputePipeline;
     },
+    createRenderPipeline(desc: GPURenderPipelineDescriptor): GPURenderPipeline {
+      return desc as unknown as GPURenderPipeline;
+    },
+    createTexture(desc: GPUTextureDescriptor): GPUTexture {
+      return {
+        ...desc,
+        createView: () => ({ texture: desc }) as unknown as GPUTextureView,
+        destroy: () => {},
+      } as unknown as GPUTexture;
+    },
+    createSampler(desc?: GPUSamplerDescriptor): GPUSampler {
+      return (desc ?? {}) as unknown as GPUSampler;
+    },
     createBindGroup(desc: GPUBindGroupDescriptor): GPUBindGroup {
       return { entries: [...desc.entries] } as unknown as GPUBindGroup;
     },
@@ -160,6 +173,21 @@ export function createMockGPUDevice(): GPUDevice {
             d.data.set(s.data.subarray(srcOffset, srcOffset + size), dstOffset);
           });
         },
+        beginRenderPass(_desc: GPURenderPassDescriptor): GPURenderPassEncoder {
+          return {
+            setPipeline() {},
+            setBindGroup() {},
+            setVertexBuffer() {},
+            setIndexBuffer() {},
+            setViewport() {},
+            setScissorRect() {},
+            draw() {},
+            drawIndexed() {},
+            end() {},
+          } as unknown as GPURenderPassEncoder;
+        },
+        copyBufferToTexture() {},
+        copyTextureToBuffer() {},
         finish(): GPUCommandBuffer {
           return { ops } as unknown as GPUCommandBuffer;
         },

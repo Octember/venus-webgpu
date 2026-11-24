@@ -188,4 +188,144 @@ export interface VenusCommandHandler {
   vkCreateRingMESA?(ringId: bigint, info: VkRingCreateInfoMESA): void;
   vkDestroyRingMESA?(ringId: bigint): void;
   vkNotifyRingMESA?(ringId: bigint, seqno: number, flags: number): void;
+
+  // Phase 2: Graphics & Presentation
+  vkCreateImage?(
+    device: VkHandle,
+    info: VkImageCreateInfo,
+    image: VkHandle,
+  ): VkResult;
+  vkDestroyImage?(device: VkHandle, image: VkHandle): void;
+  vkGetImageMemoryRequirements?(device: VkHandle, image: VkHandle): VkMemoryRequirements;
+  vkBindImageMemory?(device: VkHandle, image: VkHandle, memory: VkHandle, offset: bigint): VkResult;
+  vkCreateImageView?(
+    device: VkHandle,
+    info: VkImageViewCreateInfo,
+    view: VkHandle,
+  ): VkResult;
+  vkDestroyImageView?(device: VkHandle, view: VkHandle): void;
+  vkCreateSampler?(device: VkHandle, info: VkSamplerCreateInfo, sampler: VkHandle): VkResult;
+  vkDestroySampler?(device: VkHandle, sampler: VkHandle): void;
+  vkCreateRenderPass?(device: VkHandle, info: VkRenderPassCreateInfo, renderPass: VkHandle): VkResult;
+  vkDestroyRenderPass?(device: VkHandle, renderPass: VkHandle): void;
+  vkCreateFramebuffer?(device: VkHandle, info: VkFramebufferCreateInfo, framebuffer: VkHandle): VkResult;
+  vkDestroyFramebuffer?(device: VkHandle, framebuffer: VkHandle): void;
+  vkCreateGraphicsPipelines?(
+    device: VkHandle,
+    info: VkGraphicsPipelineCreateInfo,
+    pipeline: VkHandle,
+  ): VkResult;
+  vkCmdBeginRenderPass?(
+    commandBuffer: VkHandle,
+    renderPass: VkHandle,
+    framebuffer: VkHandle,
+    clearColor: [number, number, number, number],
+    clearDepth: number,
+  ): void;
+  vkCmdEndRenderPass?(commandBuffer: VkHandle): void;
+  vkCmdSetViewport?(
+    commandBuffer: VkHandle,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    minDepth: number,
+    maxDepth: number,
+  ): void;
+  vkCmdSetScissor?(commandBuffer: VkHandle, x: number, y: number, width: number, height: number): void;
+  vkCmdBindVertexBuffers?(
+    commandBuffer: VkHandle,
+    firstBinding: number,
+    buffers: VkHandle[],
+    offsets: bigint[],
+  ): void;
+  vkCmdBindIndexBuffer?(commandBuffer: VkHandle, buffer: VkHandle, offset: bigint, indexType: number): void;
+  vkCmdDraw?(
+    commandBuffer: VkHandle,
+    vertexCount: number,
+    instanceCount: number,
+    firstVertex: number,
+    firstInstance: number,
+  ): void;
+  vkCmdDrawIndexed?(
+    commandBuffer: VkHandle,
+    indexCount: number,
+    instanceCount: number,
+    firstIndex: number,
+    vertexOffset: number,
+    firstInstance: number,
+  ): void;
+  vkCmdCopyBufferToImage?(
+    commandBuffer: VkHandle,
+    srcBuffer: VkHandle,
+    dstImage: VkHandle,
+    bufferOffset: bigint,
+    width: number,
+    height: number,
+  ): void;
+  vkQueuePresentKHR?(queue: VkHandle, image: VkHandle): Promise<VkResult> | VkResult;
+}
+
+export interface VkImageCreateInfo {
+  format: number;
+  width: number;
+  height: number;
+  usage: number;
+}
+
+export interface VkImageViewCreateInfo {
+  image: VkHandle;
+  format: number;
+  aspectMask: number;
+}
+
+export interface VkSamplerCreateInfo {
+  magFilter: number;
+  minFilter: number;
+}
+
+export interface VkAttachmentDescription {
+  format: number;
+  loadOp: number;
+  storeOp: number;
+}
+
+export interface VkRenderPassCreateInfo {
+  colorAttachment?: VkAttachmentDescription;
+  depthAttachment?: VkAttachmentDescription;
+}
+
+export interface VkFramebufferCreateInfo {
+  renderPass: VkHandle;
+  attachments: VkHandle[];
+  width: number;
+  height: number;
+}
+
+export interface VkVertexInputBinding {
+  binding: number;
+  stride: number;
+}
+
+export interface VkVertexInputAttribute {
+  location: number;
+  binding: number;
+  format: number;
+  offset: number;
+}
+
+export interface VkGraphicsPipelineCreateInfo {
+  vertexShader: VkHandle;
+  vertexEntry: string;
+  fragmentShader: VkHandle;
+  fragmentEntry: string;
+  bindings: VkVertexInputBinding[];
+  attributes: VkVertexInputAttribute[];
+  topology: number;
+  cullMode: number;
+  depthTestEnable: boolean;
+  depthWriteEnable: boolean;
+  depthCompareOp: number;
+  layout: VkHandle;
+  renderPass: VkHandle;
 }

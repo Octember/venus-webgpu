@@ -1,4 +1,8 @@
-import type { VkDescriptorSetLayoutBinding, VkHandle } from "../protocol/types.ts";
+import type {
+  VkDescriptorSetLayoutBinding,
+  VkHandle,
+  VkRenderPassCreateInfo,
+} from "../protocol/types.ts";
 
 export interface VenusDeviceMemory {
   handle: VkHandle;
@@ -40,8 +44,54 @@ export interface VenusPipelineLayout {
 
 export interface VenusComputePipeline {
   handle: VkHandle;
+  kind: "compute";
   layout: VenusPipelineLayout;
   gpuPipeline: GPUComputePipeline;
+}
+
+export interface VenusGraphicsPipeline {
+  handle: VkHandle;
+  kind: "graphics";
+  layout: VenusPipelineLayout;
+  gpuPipeline: GPURenderPipeline;
+}
+
+export type VenusPipeline = VenusComputePipeline | VenusGraphicsPipeline;
+
+export interface VenusImage {
+  handle: VkHandle;
+  format: number;
+  width: number;
+  height: number;
+  usage: number;
+  gpuTexture: GPUTexture;
+  memory: VenusDeviceMemory | null;
+  memoryOffset: number;
+}
+
+export interface VenusImageView {
+  handle: VkHandle;
+  image: VenusImage;
+  format: number;
+  gpuView: GPUTextureView;
+}
+
+export interface VenusSampler {
+  handle: VkHandle;
+  gpuSampler: GPUSampler;
+}
+
+export interface VenusRenderPass {
+  handle: VkHandle;
+  info: VkRenderPassCreateInfo;
+}
+
+export interface VenusFramebuffer {
+  handle: VkHandle;
+  renderPass: VenusRenderPass;
+  attachments: VenusImageView[];
+  width: number;
+  height: number;
 }
 
 export interface VenusDescriptorBinding {
@@ -59,11 +109,33 @@ export interface VenusDescriptorSet {
 }
 
 export type RecordedCommand =
-  | { type: "bindPipeline"; pipeline: VenusComputePipeline }
-  | { type: "bindDescriptorSets"; firstSet: number; sets: VenusDescriptorSet[]; dynamicOffsets: number[] }
+  | { type: "bindPipeline"; bindPoint: number; pipeline: VenusPipeline }
+  | { type: "bindDescriptorSets"; bindPoint: number; firstSet: number; sets: VenusDescriptorSet[]; dynamicOffsets: number[] }
   | { type: "dispatch"; x: number; y: number; z: number }
   | { type: "copyBuffer"; src: VenusBuffer; dst: VenusBuffer; srcOffset: number; dstOffset: number; size: number }
-  | { type: "fillBuffer"; dst: VenusBuffer; dstOffset: number; size: number; data: number };
+  | { type: "fillBuffer"; dst: VenusBuffer; dstOffset: number; size: number; data: number }
+  | {
+      type: "beginRenderPass";
+      renderPass: VenusRenderPass;
+      framebuffer: VenusFramebuffer;
+      clearColor: [number, number, number, number];
+      clearDepth: number;
+    }
+  | { type: "endRenderPass" }
+  | { type: "setViewport"; x: number; y: number; width: number; height: number; minDepth: number; maxDepth: number }
+  | { type: "setScissor"; x: number; y: number; width: number; height: number }
+  | { type: "bindVertexBuffers"; firstBinding: number; buffers: VenusBuffer[]; offsets: number[] }
+  | { type: "bindIndexBuffer"; buffer: VenusBuffer; offset: number; indexType: number }
+  | { type: "draw"; vertexCount: number; instanceCount: number; firstVertex: number; firstInstance: number }
+  | {
+      type: "drawIndexed";
+      indexCount: number;
+      instanceCount: number;
+      firstIndex: number;
+      vertexOffset: number;
+      firstInstance: number;
+    }
+  | { type: "copyBufferToImage"; src: VenusBuffer; dst: VenusImage; bufferOffset: number; width: number; height: number };
 
 export interface VenusCommandBuffer {
   handle: VkHandle;
@@ -86,7 +158,12 @@ export class VenusObjectTable {
   readonly shaderModules = new Map<VkHandle, VenusShaderModule>();
   readonly descriptorSetLayouts = new Map<VkHandle, VenusDescriptorSetLayout>();
   readonly pipelineLayouts = new Map<VkHandle, VenusPipelineLayout>();
-  readonly pipelines = new Map<VkHandle, VenusComputePipeline>();
+  readonly pipelines = new Map<VkHandle, VenusPipeline>();
+  readonly images = new Map<VkHandle, VenusImage>();
+  readonly imageViews = new Map<VkHandle, VenusImageView>();
+  readonly samplers = new Map<VkHandle, VenusSampler>();
+  readonly renderPasses = new Map<VkHandle, VenusRenderPass>();
+  readonly framebuffers = new Map<VkHandle, VenusFramebuffer>();
   readonly descriptorPools = new Set<VkHandle>();
   readonly descriptorSets = new Map<VkHandle, VenusDescriptorSet>();
   readonly commandPools = new Set<VkHandle>();
@@ -106,7 +183,15 @@ export class VenusObjectTable {
     this.shaderModules.clear();
     this.descriptorSetLayouts.clear();
     this.pipelineLayouts.clear();
+    for (const img of this.images.values()) {
+      img.gpuTexture.destroy();
+    }
     this.pipelines.clear();
+    this.images.clear();
+    this.imageViews.clear();
+    this.samplers.clear();
+    this.renderPasses.clear();
+    this.framebuffers.clear();
     this.descriptorPools.clear();
     this.descriptorSets.clear();
     this.commandPools.clear();
