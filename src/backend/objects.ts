@@ -47,6 +47,8 @@ export interface VenusComputePipeline {
   kind: "compute";
   layout: VenusPipelineLayout;
   gpuPipeline: GPUComputePipeline;
+  reflectedBindGroupLayouts: GPUBindGroupLayout[];
+  storageAccess: Map<string, "read-only-storage" | "storage">;
 }
 
 export interface VenusGraphicsPipeline {
@@ -54,6 +56,8 @@ export interface VenusGraphicsPipeline {
   kind: "graphics";
   layout: VenusPipelineLayout;
   gpuPipeline: GPURenderPipeline;
+  reflectedBindGroupLayouts: GPUBindGroupLayout[];
+  storageAccess: Map<string, "read-only-storage" | "storage">;
 }
 
 export type VenusPipeline = VenusComputePipeline | VenusGraphicsPipeline;
@@ -105,6 +109,7 @@ export interface VenusDescriptorSet {
   layout: VenusDescriptorSetLayout;
   bindings: Map<number, VenusDescriptorBinding>;
   gpuBindGroup: GPUBindGroup | null;
+  gpuBindGroupsByLayout?: WeakMap<GPUBindGroupLayout, GPUBindGroup>;
   dirty: boolean;
 }
 

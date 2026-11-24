@@ -53,6 +53,9 @@ btn.addEventListener("click", async () => {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("No WebGPU adapter found.");
     const device = await adapter.requestDevice();
+    device.addEventListener("uncapturederror", (e) =>
+      console.error("[WebGPU uncapturederror]", e.error?.message ?? e),
+    );
 
     const translator = new SpirvTranslator();
     const spirv = createVectorAddSpirv();
@@ -182,8 +185,8 @@ btn.addEventListener("click", async () => {
     }
 
     const badge = document.createElement("span");
-    badge.className = "ok";
-    badge.textContent = "PASS";
+    badge.className = mismatches === 0 ? "ok" : "err";
+    badge.textContent = mismatches === 0 ? "PASS" : "FAIL";
     out.replaceChildren(
       badge,
       document.createTextNode(
@@ -256,6 +259,9 @@ cubeBtn.addEventListener("click", async () => {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("No WebGPU adapter found.");
     const device = await adapter.requestDevice();
+    device.addEventListener("uncapturederror", (e) =>
+      console.error("[WebGPU uncapturederror]", e.error?.message ?? e),
+    );
     const ctx = canvas.getContext("webgpu");
     if (!ctx) throw new Error("Could not get WebGPU canvas context.");
 

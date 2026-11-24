@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { reflectStorageAccess } from "../src/backend/webgpu-backend.ts";
 import {
   createCubeFragmentSpirv,
   createCubeVertexSpirv,
@@ -34,5 +35,14 @@ describe("SpirvTranslator (naga-wasm)", () => {
     const fs = await translator.translateToWgsl(createCubeFragmentSpirv());
     expect(fs.wgsl).toContain("@fragment");
     expect(fs.wgsl).toContain("@location(0)");
+  });
+
+  test("reflects read-only-storage vs storage binding types for createVectorAddSpirv()", async () => {
+    const translator = new SpirvTranslator();
+    const { wgsl } = await translator.translateToWgsl(createVectorAddSpirv());
+    const access = reflectStorageAccess([wgsl]);
+    expect(access.get("0:0")).toBe("read-only-storage");
+    expect(access.get("0:1")).toBe("read-only-storage");
+    expect(access.get("0:2")).toBe("storage");
   });
 });

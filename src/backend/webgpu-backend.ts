@@ -34,7 +34,13 @@ import type {
   VkWriteDescriptorSet,
 } from "../protocol/types.ts";
 import { SpirvTranslator } from "../shader/spirv.ts";
-import { VenusObjectTable, type VenusDescriptorSet, type VenusDeviceMemory } from "./objects.ts";
+import {
+  VenusObjectTable,
+  type VenusDescriptorSet,
+  type VenusDeviceMemory,
+  type VenusPipeline,
+  type VenusPipelineLayout,
+} from "./objects.ts";
 
 const DEFAULT_PHYS_DEVICE_HANDLE = 0x1000n;
 const ALIGNMENT = 256;
@@ -123,6 +129,25 @@ function vkCompareOpToWebGpu(op: number): GPUCompareFunction {
     default:
       return "less";
   }
+}
+
+export function reflectStorageAccess(
+  wgslSources: string[],
+): Map<string, "read-only-storage" | "storage"> {
+  const access = new Map<string, "read-only-storage" | "storage">();
+  const re = /@group\(\s*(\d+)\s*\)\s*@binding\(\s*(\d+)\s*\)\s*var<\s*storage(?:\s*,\s*(read|read_write))?\s*>/g;
+  for (const src of wgslSources) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) {
+      const key = `${m[1]}:${m[2]}`;
+      const mode = m[3] === "read_write" ? "storage" : "read-only-storage";
+      if (access.get(key) !== "storage") {
+        access.set(key, mode);
+      }
+    }
+  }
+  return access;
 }
 
 export class WebGpuVenusBackend implements VenusCommandHandler {
@@ -429,11 +454,23 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     const mod = this.objects.shaderModules.get(moduleHandle);
     const layout = this.objects.pipelineLayouts.get(layoutHandle);
     if (!mod || !layout) return VK_RESULT.VK_ERROR_INITIALIZATION_FAILED;
+    const storageAccess = reflectStorageAccess([mod.wgsl]);
+    const { bindGroupLayouts: reflectedBindGroupLayouts, pipelineLayout } = this.createReflectedLayouts(
+      layout,
+      storageAccess,
+    );
     const gpuPipeline = this.device.createComputePipeline({
-      layout: layout.gpuLayout,
+      layout: pipelineLayout,
       compute: { module: mod.module, entryPoint },
     });
-    this.objects.pipelines.set(pipeline, { handle: pipeline, kind: "compute", layout, gpuPipeline });
+    this.objects.pipelines.set(pipeline, {
+      handle: pipeline,
+      kind: "compute",
+      layout,
+      gpuPipeline,
+      reflectedBindGroupLayouts,
+      storageAccess,
+    });
     return VK_RESULT.VK_SUCCESS;
   }
 
@@ -663,6 +700,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
 
         let computePass: GPUComputePassEncoder | null = null;
         let renderPass: GPURenderPassEncoder | null = null;
+        let activePipeline: VenusPipeline | null = null;
         const endPass = () => {
           if (computePass) {
             computePass.end();
@@ -685,6 +723,7 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
         for (const cmd of cb.commands) {
           switch (cmd.type) {
             case "bindPipeline": {
+              activePipeline = cmd.pipeline;
               if (cmd.pipeline.kind === "graphics" && renderPass) {
                 renderPass.setPipeline(cmd.pipeline.gpuPipeline);
               } else if (cmd.pipeline.kind === "compute") {
@@ -697,7 +736,9 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
               let dynOffsetCursor = 0;
               for (let i = 0; i < cmd.sets.length; i++) {
                 const set = cmd.sets[i];
-                const bg = this.ensureBindGroup(set);
+                const setIdx = cmd.firstSet + i;
+                const targetLayout = activePipeline?.reflectedBindGroupLayouts[setIdx] ?? set.layout.gpuLayout;
+                const bg = this.ensureBindGroup(set, targetLayout);
                 const dynCount = set.layout.bindings.filter(
                   (b) =>
                     b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
@@ -705,14 +746,16 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
                 ).length;
                 const slice = cmd.dynamicOffsets.slice(dynOffsetCursor, dynOffsetCursor + dynCount);
                 dynOffsetCursor += dynCount;
-                p.setBindGroup(cmd.firstSet + i, bg, slice);
+                p.setBindGroup(setIdx, bg, slice);
                 for (const [bindingIdx, b] of set.bindings.entries()) {
                   const layoutBinding = set.layout.bindings.find((lb) => lb.binding === bindingIdx);
+                  const reflectedAccess = activePipeline?.storageAccess.get(`${setIdx}:${bindingIdx}`);
                   const isWritableStorage =
                     layoutBinding &&
                     (layoutBinding.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER ||
                       layoutBinding.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC) &&
-                    (layoutBinding.stageFlags & 0x00000001) === 0;
+                    (layoutBinding.stageFlags & 0x00000001) === 0 &&
+                    reflectedAccess !== "read-only-storage";
                   if (isWritableStorage && b.buffer.memory?.hostData) {
                     touchedHostMemories.add(b.buffer.memory);
                   }
@@ -1090,8 +1133,14 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
       ? vkFormatToWebGpu(rp.info.depthAttachment.format)
       : undefined;
 
+    const storageAccess = reflectStorageAccess([vs.wgsl, fs.wgsl]);
+    const { bindGroupLayouts: reflectedBindGroupLayouts, pipelineLayout } = this.createReflectedLayouts(
+      layout,
+      storageAccess,
+    );
+
     const gpuPipeline = this.device.createRenderPipeline({
-      layout: layout.gpuLayout,
+      layout: pipelineLayout,
       vertex: {
         module: vs.module,
         entryPoint: info.vertexEntry,
@@ -1115,7 +1164,14 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
         : undefined,
     });
 
-    this.objects.pipelines.set(pipeline, { handle: pipeline, kind: "graphics", layout, gpuPipeline });
+    this.objects.pipelines.set(pipeline, {
+      handle: pipeline,
+      kind: "graphics",
+      layout,
+      gpuPipeline,
+      reflectedBindGroupLayouts,
+      storageAccess,
+    });
     return VK_RESULT.VK_SUCCESS;
   }
 
@@ -1250,8 +1306,56 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  private ensureBindGroup(set: VenusDescriptorSet): GPUBindGroup {
-    if (set.gpuBindGroup && !set.dirty) return set.gpuBindGroup;
+  private createReflectedLayouts(
+    layout: VenusPipelineLayout,
+    storageAccess: Map<string, "read-only-storage" | "storage">,
+  ): { bindGroupLayouts: GPUBindGroupLayout[]; pipelineLayout: GPUPipelineLayout } {
+    const bindGroupLayouts = layout.setLayouts.map((setLayout, setIdx) => {
+      const entries: GPUBindGroupLayoutEntry[] = setLayout.bindings.map((b) => {
+        let visibility = 0;
+        if (b.stageFlags & 0x00000001) visibility |= GPUShaderStage.VERTEX;
+        if (b.stageFlags & 0x00000010) visibility |= GPUShaderStage.FRAGMENT;
+        if (b.stageFlags & 0x00000020) visibility |= GPUShaderStage.COMPUTE;
+        if (visibility === 0) {
+          visibility = GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
+        }
+        const isUniform =
+          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER ||
+          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC;
+        const hasDynamicOffset =
+          b.descriptorType === VK_DESCRIPTOR_TYPE.UNIFORM_BUFFER_DYNAMIC ||
+          b.descriptorType === VK_DESCRIPTOR_TYPE.STORAGE_BUFFER_DYNAMIC;
+        const reflected = storageAccess.get(`${setIdx}:${b.binding}`);
+        const storageType: GPUBufferBindingType =
+          (visibility & GPUShaderStage.VERTEX) !== 0 || reflected === "read-only-storage"
+            ? "read-only-storage"
+            : "storage";
+        return {
+          binding: b.binding,
+          visibility,
+          buffer: {
+            type: isUniform ? "uniform" : storageType,
+            hasDynamicOffset,
+          },
+        };
+      });
+      return this.device.createBindGroupLayout({ entries });
+    });
+    const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts });
+    return { bindGroupLayouts, pipelineLayout };
+  }
+
+  private ensureBindGroup(
+    set: VenusDescriptorSet,
+    layout: GPUBindGroupLayout = set.layout.gpuLayout,
+  ): GPUBindGroup {
+    if (set.dirty) {
+      set.gpuBindGroup = null;
+      set.gpuBindGroupsByLayout = new WeakMap();
+      set.dirty = false;
+    }
+    const cached = set.gpuBindGroupsByLayout?.get(layout);
+    if (cached) return cached;
     const entries: GPUBindGroupEntry[] = [];
     for (const [binding, info] of set.bindings.entries()) {
       if (!info.buffer.memory) {
@@ -1266,12 +1370,16 @@ export class WebGpuVenusBackend implements VenusCommandHandler {
         },
       });
     }
-    set.gpuBindGroup = this.device.createBindGroup({
-      layout: set.layout.gpuLayout,
+    const bg = this.device.createBindGroup({
+      layout,
       entries,
     });
-    set.dirty = false;
-    return set.gpuBindGroup;
+    if (!set.gpuBindGroupsByLayout) {
+      set.gpuBindGroupsByLayout = new WeakMap();
+    }
+    set.gpuBindGroupsByLayout.set(layout, bg);
+    set.gpuBindGroup = bg;
+    return bg;
   }
 
   private async readbackMemory(mem: VenusDeviceMemory): Promise<void> {
