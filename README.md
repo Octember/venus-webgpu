@@ -109,3 +109,13 @@ The package exports `.` (`dist/index.js`) and `./unkernel` (`dist/transport/unke
 bun run typecheck # Strict TypeScript check (tsc --noEmit)
 bun run build     # Bundle library + demo + naga_bg.wasm + .d.ts
 ```
+
+### Publishing & Releases
+
+- **First-time manual publish**:
+  ```bash
+  npm login
+  npm publish --access public
+  ```
+- **Automated releases (`.github/workflows/release.yml`)**: Pushing a `v*` tag (matching `package.json` `version`) runs `bun run check`, creates a GitHub Release with the `.tgz` tarball, and publishes to npm with provenance (`npm publish --provenance --access public`). Supports npm Trusted Publishing (OIDC) or `NPM_TOKEN` secret.
+- **GitHub Pages demo (`.github/workflows/pages.yml`)**: Pushes to `main` touching `demo/**`, `src/**`, `scripts/build.ts`, or `package.json` build and deploy the live WebGPU demo to GitHub Pages.
